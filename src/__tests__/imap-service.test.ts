@@ -11,6 +11,10 @@ const mockFetch = vi.fn();
 const mockFetchOne = vi.fn();
 const mockSearch = vi.fn();
 const mockGetMailboxLock = vi.fn().mockResolvedValue({ release: vi.fn() });
+const mockMessageMove = vi.fn().mockResolvedValue({ uidMap: new Map() });
+const mockMessageDelete = vi.fn().mockResolvedValue(true);
+const mockMessageFlagsAdd = vi.fn().mockResolvedValue(true);
+const mockMessageFlagsRemove = vi.fn().mockResolvedValue(true);
 
 vi.mock("imapflow", () => ({
   ImapFlow: vi.fn().mockImplementation(function () {
@@ -23,6 +27,10 @@ vi.mock("imapflow", () => ({
       fetchOne: mockFetchOne,
       search: mockSearch,
       getMailboxLock: mockGetMailboxLock,
+      messageMove: mockMessageMove,
+      messageDelete: mockMessageDelete,
+      messageFlagsAdd: mockMessageFlagsAdd,
+      messageFlagsRemove: mockMessageFlagsRemove,
     };
   }),
 }));
@@ -237,6 +245,73 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.searchMessages("INBOX", { subject: "nonexistent" }, 10);
       expect(result).toEqual([]);
+    });
+  });
+
+  describe("moveMessage", () => {
+    it("moves message and returns true on success", async () => {
+      const service = new ImapService(baseConfig);
+      const result = await service.moveMessage("INBOX", 42, "Archive");
+
+      expect(result).toBe(true);
+      expect(mockMessageMove).toHaveBeenCalledWith("42", "Archive", { uid: true });
+      expect(mockConnect).toHaveBeenCalled();
+      expect(mockLogout).toHaveBeenCalled();
+    });
+
+    it("returns false when server returns false", async () => {
+      mockMessageMove.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      const result = await service.moveMessage("INBOX", 42, "Archive");
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("deleteMessage", () => {
+    it("deletes message and returns true on success", async () => {
+      const service = new ImapService(baseConfig);
+      const result = await service.deleteMessage("INBOX", 42);
+
+      expect(result).toBe(true);
+      expect(mockMessageDelete).toHaveBeenCalledWith("42", { uid: true });
+      expect(mockConnect).toHaveBeenCalled();
+      expect(mockLogout).toHaveBeenCalled();
+    });
+
+    it("returns false when server returns false", async () => {
+      mockMessageDelete.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      const result = await service.deleteMessage("INBOX", 42);
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("updateFlags", () => {
+    it("adds flags when flagsToAdd is non-empty", async () => {
+      const service = new ImapService(baseConfig);
+      await service.updateFlags("INBOX", 42, ["\\Seen", "\\Flagged"], []);
+
+      expect(mockMessageFlagsAdd).toHaveBeenCalledWith("42", ["\\Seen", "\\Flagged"], { uid: true });
+      expect(mockMessageFlagsRemove).not.toHaveBeenCalled();
+    });
+
+    it("removes flags when flagsToRemove is non-empty", async () => {
+      const service = new ImapService(baseConfig);
+      await service.updateFlags("INBOX", 42, [], ["\\Seen"]);
+
+      expect(mockMessageFlagsRemove).toHaveBeenCalledWith("42", ["\\Seen"], { uid: true });
+      expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+    });
+
+    it("adds and removes flags in one call", async () => {
+      const service = new ImapService(baseConfig);
+      const result = await service.updateFlags("INBOX", 42, ["\\Flagged"], ["\\Seen"]);
+
+      expect(result).toBe(true);
+      expect(mockMessageFlagsAdd).toHaveBeenCalledWith("42", ["\\Flagged"], { uid: true });
+      expect(mockMessageFlagsRemove).toHaveBeenCalledWith("42", ["\\Seen"], { uid: true });
     });
   });
 });

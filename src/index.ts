@@ -359,6 +359,125 @@ server.registerTool(
   }
 );
 
+// ─── IMAP Mailbox Management Tools ──────────────────────────────────────────
+
+server.registerTool(
+  "move_message",
+  {
+    description: "Move an email message to a different folder",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("Message UID (use list_messages or search_messages to find UIDs)"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Source folder (default: INBOX)"),
+      destination: z.string().min(1)
+        .describe("Destination folder path (e.g. Archive, Trash, Spam)"),
+    },
+  },
+  async ({ uid, folder, destination }) => {
+    debugLog(`[Tool] Executing tool: move_message (uid=${uid}, ${folder} → ${destination})`);
+
+    try {
+      const success = await imapService.moveMessage(folder, uid, destination);
+      if (!success) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to move message UID ${uid} — the server returned no confirmation.` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to ${destination}.` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to move message: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to move message: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "delete_message",
+  {
+    description: "Permanently delete an email message",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("Message UID (use list_messages or search_messages to find UIDs)"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder containing the message (default: INBOX)"),
+    },
+  },
+  async ({ uid, folder }) => {
+    debugLog(`[Tool] Executing tool: delete_message (uid=${uid}, folder=${folder})`);
+
+    try {
+      const success = await imapService.deleteMessage(folder, uid);
+      if (!success) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to delete message UID ${uid} — the server returned no confirmation.` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to delete message: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to delete message: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "update_message_flags",
+  {
+    description: "Add or remove flags on an email message. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("Message UID"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder containing the message (default: INBOX)"),
+      flagsToAdd: z.array(z.string()).optional().default([])
+        .describe("Flags to add (e.g. [\"\\\\Seen\", \"\\\\Flagged\"])"),
+      flagsToRemove: z.array(z.string()).optional().default([])
+        .describe("Flags to remove (e.g. [\"\\\\Seen\"])"),
+    },
+  },
+  async ({ uid, folder, flagsToAdd, flagsToRemove }) => {
+    debugLog(`[Tool] Executing tool: update_message_flags (uid=${uid}, folder=${folder})`);
+
+    if (flagsToAdd.length === 0 && flagsToRemove.length === 0) {
+      return {
+        content: [{ type: "text" as const, text: "No flags specified to add or remove." }],
+        isError: true,
+      };
+    }
+
+    try {
+      await imapService.updateFlags(folder, uid, flagsToAdd, flagsToRemove);
+
+      const parts: string[] = [];
+      if (flagsToAdd.length > 0) parts.push(`added: ${flagsToAdd.join(", ")}`);
+      if (flagsToRemove.length > 0) parts.push(`removed: ${flagsToRemove.join(", ")}`);
+
+      return {
+        content: [{ type: "text" as const, text: `Flags updated on UID ${uid} in ${folder}: ${parts.join("; ")}.` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to update flags: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to update flags: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // ─── Server Startup ─────────────────────────────────────────────────────────
 
 async function main() {

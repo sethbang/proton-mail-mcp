@@ -269,6 +269,70 @@ export class ImapService {
     return false;
   }
 
+  /**
+   * Move a message to a different folder.
+   */
+  async moveMessage(folder: string, uid: number, destination: string): Promise<boolean> {
+    this.log(`[IMAP] Moving UID ${uid} from ${folder} to ${destination}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const result = await client.messageMove(String(uid), destination, { uid: true });
+        return result !== false;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Permanently delete a message.
+   */
+  async deleteMessage(folder: string, uid: number): Promise<boolean> {
+    this.log(`[IMAP] Deleting UID ${uid} from ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        return await client.messageDelete(String(uid), { uid: true });
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Add and/or remove flags on a message.
+   */
+  async updateFlags(folder: string, uid: number, flagsToAdd: string[], flagsToRemove: string[]): Promise<boolean> {
+    this.log(`[IMAP] Updating flags for UID ${uid} in ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        if (flagsToAdd.length > 0) {
+          await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
+        }
+        if (flagsToRemove.length > 0) {
+          await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
+        }
+        return true;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
   private toSummary(msg: FetchMessageObject): MessageSummary {
     return {
       uid: msg.uid,
