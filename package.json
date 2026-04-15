@@ -2,7 +2,15 @@
   "name": "proton-mail-mcp",
   "version": "0.1.0",
   "description": "MCP server for Proton Mail — send, read, and search email over SMTP and IMAP",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sethbang/proton-mail-mcp.git"
+  },
+  "homepage": "https://github.com/sethbang/proton-mail-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/sethbang/proton-mail-mcp/issues"
+  },
+  "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },

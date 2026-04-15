@@ -124,301 +124,306 @@ const sendRateLimiter = {
 // ─── SMTP Tools ─────────────────────────────────────────────────────────────
 
 if (READONLY) {
-  console.error("[Info] READONLY mode enabled — mutating tools (send, reply, forward, move, delete, flags) are disabled.");
+  console.error(
+    "[Info] READONLY mode enabled — mutating tools (send, reply, forward, move, delete, flags) are disabled.",
+  );
 }
 
-if (!READONLY) server.registerTool(
-  "send_email",
-  {
-    description: "Send an email using Proton Mail SMTP",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    inputSchema: {
-      to: z
-        .string()
-        .min(1, "Recipient is required")
-        .max(10_000, "To field too long")
-        .refine(validateAddresses, "Each 'to' address must be a valid email")
-        .describe("Recipient email address(es). Multiple addresses can be separated by commas."),
-      subject: z
-        .string()
-        .min(1, "Subject is required")
-        .max(998, "Subject exceeds RFC 5322 line length limit")
-        .describe("Email subject line"),
-      body: z
-        .string()
-        .min(1, "Body is required")
-        .max(500_000, "Body too large")
-        .describe("Email body content (can be plain text or HTML)"),
-      isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
-      cc: z
-        .string()
-        .max(10_000, "CC field too long")
-        .refine(validateAddresses, "Each CC address must be a valid email")
-        .optional()
-        .describe("CC recipient(s), separated by commas"),
-      bcc: z
-        .string()
-        .max(10_000, "BCC field too long")
-        .refine(validateAddresses, "Each BCC address must be a valid email")
-        .optional()
-        .describe("BCC recipient(s), separated by commas"),
-      replyTo: z
-        .string()
-        .max(10_000, "Reply-To field too long")
-        .refine(validateAddresses, "Reply-To must be a valid email")
-        .optional()
-        .describe("Reply-To email address"),
-      fromName: z.string().max(200, "From name too long").optional().describe("Display name for the From field"),
-      attachments: z
-        .array(
-          z.object({
-            filename: z.string().min(1).describe("Attachment filename"),
-            content: z.string().min(1).describe("Base64-encoded file content"),
-            contentType: z.string().min(1).describe("MIME type (e.g. application/pdf, image/png)"),
-          }),
-        )
-        .optional()
-        .describe("File attachments (base64-encoded content)"),
+if (!READONLY)
+  server.registerTool(
+    "send_email",
+    {
+      description: "Send an email using Proton Mail SMTP",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        to: z
+          .string()
+          .min(1, "Recipient is required")
+          .max(10_000, "To field too long")
+          .refine(validateAddresses, "Each 'to' address must be a valid email")
+          .describe("Recipient email address(es). Multiple addresses can be separated by commas."),
+        subject: z
+          .string()
+          .min(1, "Subject is required")
+          .max(998, "Subject exceeds RFC 5322 line length limit")
+          .describe("Email subject line"),
+        body: z
+          .string()
+          .min(1, "Body is required")
+          .max(500_000, "Body too large")
+          .describe("Email body content (can be plain text or HTML)"),
+        isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
+        cc: z
+          .string()
+          .max(10_000, "CC field too long")
+          .refine(validateAddresses, "Each CC address must be a valid email")
+          .optional()
+          .describe("CC recipient(s), separated by commas"),
+        bcc: z
+          .string()
+          .max(10_000, "BCC field too long")
+          .refine(validateAddresses, "Each BCC address must be a valid email")
+          .optional()
+          .describe("BCC recipient(s), separated by commas"),
+        replyTo: z
+          .string()
+          .max(10_000, "Reply-To field too long")
+          .refine(validateAddresses, "Reply-To must be a valid email")
+          .optional()
+          .describe("Reply-To email address"),
+        fromName: z.string().max(200, "From name too long").optional().describe("Display name for the From field"),
+        attachments: z
+          .array(
+            z.object({
+              filename: z.string().min(1).describe("Attachment filename"),
+              content: z.string().min(1).describe("Base64-encoded file content"),
+              contentType: z.string().min(1).describe("MIME type (e.g. application/pdf, image/png)"),
+            }),
+          )
+          .optional()
+          .describe("File attachments (base64-encoded content)"),
+      },
     },
-  },
-  async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName, attachments }) => {
-    debugLog(`[Tool] Executing tool: send_email`);
+    async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName, attachments }) => {
+      debugLog(`[Tool] Executing tool: send_email`);
 
-    if (!sendRateLimiter.check()) {
-      return {
-        content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
-        isError: true,
-      };
-    }
-
-    try {
-      await emailService.sendEmail({
-        to,
-        subject,
-        body,
-        isHtml,
-        cc,
-        bcc,
-        replyTo,
-        fromName,
-        attachments,
-      });
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}.`,
-          },
-        ],
-      };
-    } catch (error) {
-      console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Failed to send email: ${sanitizeError(error)}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-if (!READONLY) server.registerTool(
-  "reply_email",
-  {
-    description:
-      "Reply to an email message. Reads the original message and sends a reply with proper threading headers (In-Reply-To, References).",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    inputSchema: {
-      uid: z.number().int().min(1).describe("UID of the message to reply to"),
-      folder: z
-        .string()
-        .optional()
-        .default("INBOX")
-        .describe("Folder containing the original message (default: INBOX)"),
-      body: z.string().min(1).max(500_000).describe("Reply body content"),
-      isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
-      cc: z
-        .string()
-        .max(10_000)
-        .refine(validateAddresses, "Each CC address must be a valid email")
-        .optional()
-        .describe("Additional CC recipients, separated by commas"),
-      bcc: z
-        .string()
-        .max(10_000)
-        .refine(validateAddresses, "Each BCC address must be a valid email")
-        .optional()
-        .describe("BCC recipients, separated by commas"),
-      replyAll: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Reply to all recipients (sender + TO + CC) instead of just sender"),
-    },
-  },
-  async ({ uid, folder, body, isHtml, cc, bcc, replyAll }) => {
-    debugLog(`[Tool] Executing tool: reply_email (uid=${uid}, folder=${folder}, replyAll=${replyAll})`);
-
-    if (!sendRateLimiter.check()) {
-      return {
-        content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
-        isError: true,
-      };
-    }
-
-    try {
-      const original = await imapService.readMessage(folder, uid);
-
-      // Build threading headers
-      const inReplyTo = original.messageId;
-      const references = original.messageId;
-
-      // Build subject
-      const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
-
-      // Build recipients
-      let to = original.from;
-      let replyCC = cc || "";
-
-      if (replyAll) {
-        // Collect original TO and CC, excluding our own address
-        const allRecipients = [original.to, original.cc]
-          .filter(Boolean)
-          .join(", ")
-          .split(",")
-          .map((a) => a.trim())
-          .filter((a) => a && !a.includes(emailConfig.auth.user));
-
-        if (allRecipients.length > 0) {
-          replyCC = replyCC ? `${replyCC}, ${allRecipients.join(", ")}` : allRecipients.join(", ");
-        }
+      if (!sendRateLimiter.check()) {
+        return {
+          content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
+          isError: true,
+        };
       }
 
-      await emailService.sendEmail({
-        to,
-        subject,
-        body,
-        isHtml,
-        cc: replyCC || undefined,
-        bcc,
-        inReplyTo,
-        references,
-      });
+      try {
+        await emailService.sendEmail({
+          to,
+          subject,
+          body,
+          isHtml,
+          cc,
+          bcc,
+          replyTo,
+          fromName,
+          attachments,
+        });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Reply sent to ${to}${replyCC ? ` with CC to ${replyCC}` : ""}.`,
-          },
-        ],
-      };
-    } catch (error) {
-      console.error(`[Error] Failed to reply: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        content: [{ type: "text" as const, text: `Failed to reply: ${sanitizeError(error)}` }],
-        isError: true,
-      };
-    }
-  },
-);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}.`,
+            },
+          ],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
 
-if (!READONLY) server.registerTool(
-  "forward_email",
-  {
-    description:
-      "Forward an email message. Reads the original message and sends it to new recipients with proper threading headers.",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    inputSchema: {
-      uid: z.number().int().min(1).describe("UID of the message to forward"),
-      folder: z
-        .string()
-        .optional()
-        .default("INBOX")
-        .describe("Folder containing the original message (default: INBOX)"),
-      to: z
-        .string()
-        .min(1, "Recipient is required")
-        .max(10_000)
-        .refine(validateAddresses, "Each 'to' address must be a valid email")
-        .describe("Recipient email address(es), separated by commas"),
-      body: z
-        .string()
-        .max(500_000)
-        .optional()
-        .default("")
-        .describe("Optional message to prepend above the forwarded content"),
-      isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
-      cc: z
-        .string()
-        .max(10_000)
-        .refine(validateAddresses, "Each CC address must be a valid email")
-        .optional()
-        .describe("CC recipients, separated by commas"),
-      bcc: z
-        .string()
-        .max(10_000)
-        .refine(validateAddresses, "Each BCC address must be a valid email")
-        .optional()
-        .describe("BCC recipients, separated by commas"),
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to send email: ${sanitizeError(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     },
-  },
-  async ({ uid, folder, to, body, isHtml, cc, bcc }) => {
-    debugLog(`[Tool] Executing tool: forward_email (uid=${uid}, folder=${folder}, to=${to})`);
+  );
 
-    if (!sendRateLimiter.check()) {
-      return {
-        content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
-        isError: true,
-      };
-    }
+if (!READONLY)
+  server.registerTool(
+    "reply_email",
+    {
+      description:
+        "Reply to an email message. Reads the original message and sends a reply with proper threading headers (In-Reply-To, References).",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        uid: z.number().int().min(1).describe("UID of the message to reply to"),
+        folder: z
+          .string()
+          .optional()
+          .default("INBOX")
+          .describe("Folder containing the original message (default: INBOX)"),
+        body: z.string().min(1).max(500_000).describe("Reply body content"),
+        isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
+        cc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each CC address must be a valid email")
+          .optional()
+          .describe("Additional CC recipients, separated by commas"),
+        bcc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each BCC address must be a valid email")
+          .optional()
+          .describe("BCC recipients, separated by commas"),
+        replyAll: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Reply to all recipients (sender + TO + CC) instead of just sender"),
+      },
+    },
+    async ({ uid, folder, body, isHtml, cc, bcc, replyAll }) => {
+      debugLog(`[Tool] Executing tool: reply_email (uid=${uid}, folder=${folder}, replyAll=${replyAll})`);
 
-    try {
-      const original = await imapService.readMessage(folder, uid);
+      if (!sendRateLimiter.check()) {
+        return {
+          content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
+          isError: true,
+        };
+      }
 
-      const subject = /^fwd:/i.test(original.subject) ? original.subject : `Fwd: ${original.subject}`;
+      try {
+        const original = await imapService.readMessage(folder, uid);
 
-      const originalContent = original.text || original.html || "(no content)";
-      const separator = "\n\n---------- Forwarded message ----------\n";
-      const originalHeaders = `From: ${original.from}\nDate: ${original.date}\nSubject: ${original.subject}\nTo: ${original.to}\n\n`;
-      const fullBody = body
-        ? `${body}${separator}${originalHeaders}${originalContent}`
-        : `${separator}${originalHeaders}${originalContent}`;
+        // Build threading headers
+        const inReplyTo = original.messageId;
+        const references = original.messageId;
 
-      await emailService.sendEmail({
-        to,
-        subject,
-        body: fullBody,
-        isHtml,
-        cc,
-        bcc,
-        inReplyTo: original.messageId,
-        references: original.messageId,
-      });
+        // Build subject
+        const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}.`,
-          },
-        ],
-      };
-    } catch (error) {
-      console.error(`[Error] Failed to forward: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        content: [{ type: "text" as const, text: `Failed to forward: ${sanitizeError(error)}` }],
-        isError: true,
-      };
-    }
-  },
-);
+        // Build recipients
+        let to = original.from;
+        let replyCC = cc || "";
+
+        if (replyAll) {
+          // Collect original TO and CC, excluding our own address
+          const allRecipients = [original.to, original.cc]
+            .filter(Boolean)
+            .join(", ")
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a && !a.includes(emailConfig.auth.user));
+
+          if (allRecipients.length > 0) {
+            replyCC = replyCC ? `${replyCC}, ${allRecipients.join(", ")}` : allRecipients.join(", ");
+          }
+        }
+
+        await emailService.sendEmail({
+          to,
+          subject,
+          body,
+          isHtml,
+          cc: replyCC || undefined,
+          bcc,
+          inReplyTo,
+          references,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Reply sent to ${to}${replyCC ? ` with CC to ${replyCC}` : ""}.`,
+            },
+          ],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to reply: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to reply: ${sanitizeError(error)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+if (!READONLY)
+  server.registerTool(
+    "forward_email",
+    {
+      description:
+        "Forward an email message. Reads the original message and sends it to new recipients with proper threading headers.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        uid: z.number().int().min(1).describe("UID of the message to forward"),
+        folder: z
+          .string()
+          .optional()
+          .default("INBOX")
+          .describe("Folder containing the original message (default: INBOX)"),
+        to: z
+          .string()
+          .min(1, "Recipient is required")
+          .max(10_000)
+          .refine(validateAddresses, "Each 'to' address must be a valid email")
+          .describe("Recipient email address(es), separated by commas"),
+        body: z
+          .string()
+          .max(500_000)
+          .optional()
+          .default("")
+          .describe("Optional message to prepend above the forwarded content"),
+        isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
+        cc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each CC address must be a valid email")
+          .optional()
+          .describe("CC recipients, separated by commas"),
+        bcc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each BCC address must be a valid email")
+          .optional()
+          .describe("BCC recipients, separated by commas"),
+      },
+    },
+    async ({ uid, folder, to, body, isHtml, cc, bcc }) => {
+      debugLog(`[Tool] Executing tool: forward_email (uid=${uid}, folder=${folder}, to=${to})`);
+
+      if (!sendRateLimiter.check()) {
+        return {
+          content: [{ type: "text" as const, text: "Rate limit exceeded. Maximum 10 emails per minute." }],
+          isError: true,
+        };
+      }
+
+      try {
+        const original = await imapService.readMessage(folder, uid);
+
+        const subject = /^fwd:/i.test(original.subject) ? original.subject : `Fwd: ${original.subject}`;
+
+        const originalContent = original.text || original.html || "(no content)";
+        const separator = "\n\n---------- Forwarded message ----------\n";
+        const originalHeaders = `From: ${original.from}\nDate: ${original.date}\nSubject: ${original.subject}\nTo: ${original.to}\n\n`;
+        const fullBody = body
+          ? `${body}${separator}${originalHeaders}${originalContent}`
+          : `${separator}${originalHeaders}${originalContent}`;
+
+        await emailService.sendEmail({
+          to,
+          subject,
+          body: fullBody,
+          isHtml,
+          cc,
+          bcc,
+          inReplyTo: original.messageId,
+          references: original.messageId,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}.`,
+            },
+          ],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to forward: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to forward: ${sanitizeError(error)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
 
 // ─── IMAP Tools ─────────────────────────────────────────────────────────────
 
@@ -663,166 +668,172 @@ server.registerTool(
 
 // ─── IMAP Mailbox Management Tools ──────────────────────────────────────────
 
-if (!READONLY) server.registerTool(
-  "move_message",
-  {
-    description: "Move an email message to a different folder",
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    inputSchema: {
-      uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
-      folder: z.string().optional().default("INBOX").describe("Source folder (default: INBOX)"),
-      destination: z.string().min(1).describe("Destination folder path (e.g. Archive, Trash, Spam)"),
+if (!READONLY)
+  server.registerTool(
+    "move_message",
+    {
+      description: "Move an email message to a different folder",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+      inputSchema: {
+        uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
+        folder: z.string().optional().default("INBOX").describe("Source folder (default: INBOX)"),
+        destination: z.string().min(1).describe("Destination folder path (e.g. Archive, Trash, Spam)"),
+      },
     },
-  },
-  async ({ uid, folder, destination }) => {
-    debugLog(`[Tool] Executing tool: move_message (uid=${uid}, ${folder} → ${destination})`);
+    async ({ uid, folder, destination }) => {
+      debugLog(`[Tool] Executing tool: move_message (uid=${uid}, ${folder} → ${destination})`);
 
-    try {
-      const success = await imapService.moveMessage(folder, uid, destination);
-      if (!success) {
+      try {
+        const success = await imapService.moveMessage(folder, uid, destination);
+        if (!success) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to move message UID ${uid} — the server returned no confirmation.`,
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
-          content: [
-            { type: "text" as const, text: `Failed to move message UID ${uid} — the server returned no confirmation.` },
-          ],
+          content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to ${destination}.` }],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to move message: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to move message: ${sanitizeError(error)}` }],
           isError: true,
         };
       }
-      return {
-        content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to ${destination}.` }],
-      };
-    } catch (error) {
-      console.error(`[Error] Failed to move message: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        content: [{ type: "text" as const, text: `Failed to move message: ${sanitizeError(error)}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
-if (!READONLY) server.registerTool(
-  "delete_message",
-  {
-    description:
-      "Delete an email message. By default moves to Trash for safety; set permanent=true to permanently expunge.",
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    inputSchema: {
-      uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
-      folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
-      permanent: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("If true, permanently expunge the message instead of moving to Trash"),
     },
-  },
-  async ({ uid, folder, permanent }) => {
-    debugLog(`[Tool] Executing tool: delete_message (uid=${uid}, folder=${folder}, permanent=${permanent})`);
+  );
 
-    try {
-      if (permanent) {
-        const success = await imapService.deleteMessage(folder, uid);
-        if (!success) {
+if (!READONLY)
+  server.registerTool(
+    "delete_message",
+    {
+      description:
+        "Delete an email message. By default moves to Trash for safety; set permanent=true to permanently expunge.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+      inputSchema: {
+        uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
+        folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
+        permanent: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("If true, permanently expunge the message instead of moving to Trash"),
+      },
+    },
+    async ({ uid, folder, permanent }) => {
+      debugLog(`[Tool] Executing tool: delete_message (uid=${uid}, folder=${folder}, permanent=${permanent})`);
+
+      try {
+        if (permanent) {
+          const success = await imapService.deleteMessage(folder, uid);
+          if (!success) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Failed to delete message UID ${uid} — the server returned no confirmation.`,
+                },
+              ],
+              isError: true,
+            };
+          }
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to delete message UID ${uid} — the server returned no confirmation.`,
-              },
-            ],
-            isError: true,
+            content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
+          };
+        } else {
+          const success = await imapService.moveMessage(folder, uid, "Trash");
+          if (!success) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Failed to move message UID ${uid} to Trash — the server returned no confirmation.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          return {
+            content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to Trash.` }],
           };
         }
+      } catch (error) {
+        console.error(`[Error] Failed to delete message: ${error instanceof Error ? error.message : String(error)}`);
         return {
-          content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
-        };
-      } else {
-        const success = await imapService.moveMessage(folder, uid, "Trash");
-        if (!success) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to move message UID ${uid} to Trash — the server returned no confirmation.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to Trash.` }],
+          content: [{ type: "text" as const, text: `Failed to delete message: ${sanitizeError(error)}` }],
+          isError: true,
         };
       }
-    } catch (error) {
-      console.error(`[Error] Failed to delete message: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        content: [{ type: "text" as const, text: `Failed to delete message: ${sanitizeError(error)}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
-if (!READONLY) server.registerTool(
-  "update_message_flags",
-  {
-    description:
-      "Add or remove flags on an email message. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    inputSchema: {
-      uid: z.number().int().min(1).describe("Message UID"),
-      folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
-      flagsToAdd: z
-        .array(
-          z.string().refine((f) => {
-            validateImapFlag(f);
-            return true;
-          }, "Invalid IMAP flag format"),
-        )
-        .optional()
-        .default([])
-        .describe('Flags to add (e.g. ["\\\\Seen", "\\\\Flagged"])'),
-      flagsToRemove: z
-        .array(
-          z.string().refine((f) => {
-            validateImapFlag(f);
-            return true;
-          }, "Invalid IMAP flag format"),
-        )
-        .optional()
-        .default([])
-        .describe('Flags to remove (e.g. ["\\\\Seen"])'),
     },
-  },
-  async ({ uid, folder, flagsToAdd, flagsToRemove }) => {
-    debugLog(`[Tool] Executing tool: update_message_flags (uid=${uid}, folder=${folder})`);
+  );
 
-    if (flagsToAdd.length === 0 && flagsToRemove.length === 0) {
-      return {
-        content: [{ type: "text" as const, text: "No flags specified to add or remove." }],
-        isError: true,
-      };
-    }
+if (!READONLY)
+  server.registerTool(
+    "update_message_flags",
+    {
+      description:
+        "Add or remove flags on an email message. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        uid: z.number().int().min(1).describe("Message UID"),
+        folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
+        flagsToAdd: z
+          .array(
+            z.string().refine((f) => {
+              validateImapFlag(f);
+              return true;
+            }, "Invalid IMAP flag format"),
+          )
+          .optional()
+          .default([])
+          .describe('Flags to add (e.g. ["\\\\Seen", "\\\\Flagged"])'),
+        flagsToRemove: z
+          .array(
+            z.string().refine((f) => {
+              validateImapFlag(f);
+              return true;
+            }, "Invalid IMAP flag format"),
+          )
+          .optional()
+          .default([])
+          .describe('Flags to remove (e.g. ["\\\\Seen"])'),
+      },
+    },
+    async ({ uid, folder, flagsToAdd, flagsToRemove }) => {
+      debugLog(`[Tool] Executing tool: update_message_flags (uid=${uid}, folder=${folder})`);
 
-    try {
-      await imapService.updateFlags(folder, uid, flagsToAdd, flagsToRemove);
+      if (flagsToAdd.length === 0 && flagsToRemove.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No flags specified to add or remove." }],
+          isError: true,
+        };
+      }
 
-      const parts: string[] = [];
-      if (flagsToAdd.length > 0) parts.push(`added: ${flagsToAdd.join(", ")}`);
-      if (flagsToRemove.length > 0) parts.push(`removed: ${flagsToRemove.join(", ")}`);
+      try {
+        await imapService.updateFlags(folder, uid, flagsToAdd, flagsToRemove);
 
-      return {
-        content: [{ type: "text" as const, text: `Flags updated on UID ${uid} in ${folder}: ${parts.join("; ")}.` }],
-      };
-    } catch (error) {
-      console.error(`[Error] Failed to update flags: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        content: [{ type: "text" as const, text: `Failed to update flags: ${sanitizeError(error)}` }],
-        isError: true,
-      };
-    }
-  },
-);
+        const parts: string[] = [];
+        if (flagsToAdd.length > 0) parts.push(`added: ${flagsToAdd.join(", ")}`);
+        if (flagsToRemove.length > 0) parts.push(`removed: ${flagsToRemove.join(", ")}`);
+
+        return {
+          content: [{ type: "text" as const, text: `Flags updated on UID ${uid} in ${folder}: ${parts.join("; ")}.` }],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to update flags: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to update flags: ${sanitizeError(error)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
 
 // ─── Server Startup ─────────────────────────────────────────────────────────
 

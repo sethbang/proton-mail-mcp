@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "protonmail": {
+      "command": "node",
+      "args": ["/path/to/proton-mail-mcp/build/index.js"],
+      "env": {
+        "PROTONMAIL_USERNAME": "your-email@pm.me",
+        "PROTONMAIL_PASSWORD": "your-smtp-password",
+        "PROTONMAIL_HOST": "127.0.0.1",
+        "PROTONMAIL_PORT": "1025",
+        "PROTONMAIL_SECURE": "true",
+        "IMAP_HOST": "127.0.0.1",
+        "IMAP_PORT": "1143",
+        "IMAP_SECURE": "false"
+      }
+    }
+  }
+}
