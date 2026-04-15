@@ -136,6 +136,7 @@ describe("ImapService", () => {
           messageId: "<abc123@example.com>",
         },
         flags: new Set(["\\Seen"]),
+        bodyStructure: { type: "text/plain", part: "1" },
         bodyParts: new Map([["TEXT", Buffer.from("Hello, this is the body.")]]),
       });
 
@@ -160,6 +161,13 @@ describe("ImapService", () => {
           messageId: "<html123@example.com>",
         },
         flags: new Set(),
+        bodyStructure: {
+          type: "multipart/alternative",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            { type: "text/html", part: "2" },
+          ],
+        },
         bodyParts: new Map([["TEXT", Buffer.from("<html><body><p>Hello</p></body></html>")]]),
       });
 

@@ -110,6 +110,24 @@ describe("EmailService", () => {
       expect(call.text).toBe("Hello\n\nWorld");
     });
 
+    it("sanitizes fromName to prevent header injection", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Test",
+        body: "Hello",
+        fromName: 'John "Bobby" Doe',
+      });
+
+      expect(mock.sendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: '"John Bobby Doe" <test@protonmail.com>',
+        }),
+      );
+    });
+
     it("passes cc and bcc through", async () => {
       const service = new EmailService(baseConfig);
       const mock = getTransporterMock();

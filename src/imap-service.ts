@@ -2,6 +2,7 @@ import { ImapFlow } from "imapflow";
 import type {
   FetchMessageObject,
   MessageAddressObject,
+  MessageStructureObject,
   SearchObject,
 } from "imapflow";
 
@@ -160,6 +161,7 @@ export class ImapService {
             uid: true,
             envelope: true,
             flags: true,
+            bodyStructure: true,
             bodyParts: ["TEXT", "1"],
           },
           { uid: true },
@@ -172,10 +174,9 @@ export class ImapService {
         const textPart = msg.bodyParts?.get("TEXT") || msg.bodyParts?.get("1");
         const textContent = textPart ? textPart.toString("utf-8") : "";
 
-        // Try to separate HTML from plain text based on content
         let text = "";
         let html = "";
-        if (textContent.includes("<html") || textContent.includes("<body") || textContent.includes("<div")) {
+        if (msg.bodyStructure && ImapService.hasHtmlPart(msg.bodyStructure)) {
           html = textContent;
         } else {
           text = textContent;
@@ -258,6 +259,14 @@ export class ImapService {
     } finally {
       await client.logout().catch(() => {});
     }
+  }
+
+  private static hasHtmlPart(structure: MessageStructureObject): boolean {
+    if (structure.type === "text/html") return true;
+    if (structure.childNodes) {
+      return structure.childNodes.some((child) => ImapService.hasHtmlPart(child));
+    }
+    return false;
   }
 
   private toSummary(msg: FetchMessageObject): MessageSummary {

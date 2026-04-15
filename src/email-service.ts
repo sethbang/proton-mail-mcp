@@ -94,7 +94,8 @@ export class EmailService {
     }
 
     try {
-      const from = message.fromName ? `"${message.fromName}" <${this.fromEmail}>` : this.fromEmail;
+      const safeName = message.fromName?.replace(/["\\]/g, "") || "";
+      const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
       const info = await this.transporter.sendMail({
         from,
         to: message.to,

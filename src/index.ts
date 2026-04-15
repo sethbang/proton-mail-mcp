@@ -36,6 +36,11 @@ if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
   process.exit(1);
 }
 
+if (!IMAP_USERNAME || !IMAP_PASSWORD) {
+  console.error("[Error] Missing IMAP credentials: set IMAP_USERNAME/IMAP_PASSWORD or PROTONMAIL_USERNAME/PROTONMAIL_PASSWORD as fallback");
+  process.exit(1);
+}
+
 // Helper function for debug logging
 function debugLog(message: string): void {
   if (DEBUG) {
@@ -91,7 +96,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "0.2.0",
+  version: "0.1.0",
 });
 
 // Basic email format check for comma-separated address fields
