@@ -4,7 +4,7 @@
   "description": "MCP server for Proton Mail — send, read, and search email over SMTP and IMAP",
   "private": true,
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "type": "module",
   "bin": {
