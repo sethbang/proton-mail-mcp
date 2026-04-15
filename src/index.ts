@@ -1,29 +1,34 @@
 #!/usr/bin/env node
 
 /**
- * Protonmail MCP Server
- * 
- * This MCP server provides email sending functionality using Protonmail's SMTP service.
- * It implements a single tool for sending emails with various options.
+ * Proton Mail MCP Server
+ *
+ * This MCP server provides email sending and reading functionality
+ * using Proton Mail's SMTP service and Proton Mail Bridge IMAP.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-  ErrorCode,
-} from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { EmailService, EmailConfig } from "./email-service.js";
+import { ImapService, ImapConfig } from "./imap-service.js";
 
 // Get environment variables for SMTP configuration
 const PROTONMAIL_USERNAME = process.env.PROTONMAIL_USERNAME;
 const PROTONMAIL_PASSWORD = process.env.PROTONMAIL_PASSWORD;
 const PROTONMAIL_HOST = process.env.PROTONMAIL_HOST || "smtp.protonmail.ch";
-const PROTONMAIL_PORT = parseInt(process.env.PROTONMAIL_PORT || "587", 10);
+const rawPort = parseInt(process.env.PROTONMAIL_PORT || "587", 10);
+const PROTONMAIL_PORT = Number.isNaN(rawPort) ? 587 : rawPort;
 const PROTONMAIL_SECURE = process.env.PROTONMAIL_SECURE === "true";
 const DEBUG = process.env.DEBUG === "true";
+
+// Get environment variables for IMAP configuration (Proton Mail Bridge)
+const IMAP_HOST = process.env.IMAP_HOST || "127.0.0.1";
+const rawImapPort = parseInt(process.env.IMAP_PORT || "1143", 10);
+const IMAP_PORT = Number.isNaN(rawImapPort) ? 1143 : rawImapPort;
+const IMAP_SECURE = process.env.IMAP_SECURE === "true";
+const IMAP_USERNAME = process.env.IMAP_USERNAME || PROTONMAIL_USERNAME;
+const IMAP_PASSWORD = process.env.IMAP_PASSWORD || PROTONMAIL_PASSWORD;
 
 // Validate required environment variables
 if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
@@ -38,6 +43,17 @@ function debugLog(message: string): void {
   }
 }
 
+/**
+ * Strip credential-like substrings from error messages before returning to MCP clients.
+ * Full error details are still logged to stderr for debugging.
+ */
+function sanitizeError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg
+    .replace(/(?:user|pass|password|auth|credentials?)[=:\s]+"?[^\s"]+/gi, "[REDACTED]")
+    .replace(/(?:smtp|imap):\/\/[^\s]+/gi, "[REDACTED_URL]");
+}
+
 // Create email service configuration
 const emailConfig: EmailConfig = {
   host: PROTONMAIL_HOST,
@@ -48,156 +64,312 @@ const emailConfig: EmailConfig = {
     pass: PROTONMAIL_PASSWORD,
   },
   debug: DEBUG,
+  connectionTimeout: 30_000,
+  greetingTimeout: 30_000,
+  socketTimeout: 60_000,
 };
 
-// Initialize email service
+// Create IMAP service configuration
+const imapConfig: ImapConfig = {
+  host: IMAP_HOST,
+  port: IMAP_PORT,
+  secure: IMAP_SECURE,
+  auth: {
+    user: IMAP_USERNAME!,
+    pass: IMAP_PASSWORD!,
+  },
+  debug: DEBUG,
+  connectionTimeout: 30_000,
+};
+
+// Initialize services
 const emailService = new EmailService(emailConfig);
+const imapService = new ImapService(imapConfig);
 
 /**
- * Create an MCP server with capabilities for tools (to send emails)
+ * Create an MCP server with capabilities for tools
  */
-const server = new Server(
+const server = new McpServer({
+  name: "proton-mail-mcp",
+  version: "0.2.0",
+});
+
+// Basic email format check for comma-separated address fields
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function validateAddresses(value: string): boolean {
+  return value.split(",").every((addr) => emailRegex.test(addr.trim()));
+}
+
+// ─── SMTP Tools ─────────────────────────────────────────────────────────────
+
+server.registerTool(
+  "send_email",
   {
-    name: "protonmail-mcp",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
+    description: "Send an email using Proton Mail SMTP",
+    inputSchema: {
+      to: z.string()
+        .min(1, "Recipient is required")
+        .max(10_000, "To field too long")
+        .refine(validateAddresses, "Each 'to' address must be a valid email")
+        .describe("Recipient email address(es). Multiple addresses can be separated by commas."),
+      subject: z.string()
+        .min(1, "Subject is required")
+        .max(998, "Subject exceeds RFC 5322 line length limit")
+        .describe("Email subject line"),
+      body: z.string()
+        .min(1, "Body is required")
+        .max(500_000, "Body too large")
+        .describe("Email body content (can be plain text or HTML)"),
+      isHtml: z.boolean().optional().default(false)
+        .describe("Whether the body contains HTML content"),
+      cc: z.string()
+        .max(10_000, "CC field too long")
+        .refine(validateAddresses, "Each CC address must be a valid email")
+        .optional()
+        .describe("CC recipient(s), separated by commas"),
+      bcc: z.string()
+        .max(10_000, "BCC field too long")
+        .refine(validateAddresses, "Each BCC address must be a valid email")
+        .optional()
+        .describe("BCC recipient(s), separated by commas"),
+      replyTo: z.string()
+        .max(10_000, "Reply-To field too long")
+        .refine(validateAddresses, "Reply-To must be a valid email")
+        .optional()
+        .describe("Reply-To email address"),
+      fromName: z.string()
+        .max(200, "From name too long")
+        .optional()
+        .describe("Display name for the From field"),
     },
+  },
+  async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName }) => {
+    debugLog(`[Tool] Executing tool: send_email`);
+
+    try {
+      await emailService.sendEmail({
+        to,
+        subject,
+        body,
+        isHtml,
+        cc,
+        bcc,
+        replyTo,
+        fromName,
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}.`,
+        }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Failed to send email: ${sanitizeError(error)}`,
+        }],
+        isError: true,
+      };
+    }
   }
 );
 
-/**
- * Handler that lists available tools.
- * Exposes a single "send_email" tool that lets clients send emails.
- */
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  debugLog("[Setup] Listing available tools");
-  
-  return {
-    tools: [
-      {
-        name: "send_email",
-        description: "Send an email using Protonmail SMTP",
-        inputSchema: {
-          type: "object",
-          properties: {
-            to: {
-              type: "string",
-              description: "Recipient email address(es). Multiple addresses can be separated by commas."
-            },
-            subject: {
-              type: "string",
-              description: "Email subject line"
-            },
-            body: {
-              type: "string",
-              description: "Email body content (can be plain text or HTML)"
-            },
-            isHtml: {
-              type: "boolean",
-              description: "Whether the body contains HTML content",
-              default: false
-            },
-            cc: {
-              type: "string",
-              description: "CC recipient(s), separated by commas"
-            },
-            bcc: {
-              type: "string",
-              description: "BCC recipient(s), separated by commas"
-            }
-          },
-          required: ["to", "subject", "body"]
-        }
-      }
-    ]
-  };
-});
+// ─── IMAP Tools ─────────────────────────────────────────────────────────────
 
-/**
- * Handler for the send_email tool.
- * Sends an email with the provided details and returns success message.
- */
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  debugLog(`[Tool] Executing tool: ${request.params.name}`);
-  
-  switch (request.params.name) {
-    case "send_email": {
-      const args = request.params.arguments;
-      
-      // Validate required arguments
-      if (!args || typeof args !== "object") {
-        throw new McpError(ErrorCode.InvalidParams, "Invalid arguments");
-      }
-      
-      const { to, subject, body, isHtml, cc, bcc } = args as any;
-      
-      if (!to || typeof to !== "string") {
-        throw new McpError(ErrorCode.InvalidParams, "Missing or invalid 'to' parameter");
-      }
-      
-      if (!subject || typeof subject !== "string") {
-        throw new McpError(ErrorCode.InvalidParams, "Missing or invalid 'subject' parameter");
-      }
-      
-      if (!body || typeof body !== "string") {
-        throw new McpError(ErrorCode.InvalidParams, "Missing or invalid 'body' parameter");
-      }
-      
-      try {
-        // Send the email
-        const result = await emailService.sendEmail({
-          to,
-          subject,
-          body,
-          isHtml: isHtml === true,
-          cc: typeof cc === "string" ? cc : undefined,
-          bcc: typeof bcc === "string" ? bcc : undefined,
-        });
-        
-        return {
-          content: [{
-            type: "text",
-            text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}.`
-          }]
-        };
-      } catch (error) {
-      // Always log errors, even in non-debug mode
-      console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
-      
-      throw new McpError(
-          ErrorCode.InternalError,
-          `Failed to send email: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+server.registerTool(
+  "list_folders",
+  {
+    description: "List available email folders/mailboxes with message counts",
+    inputSchema: {},
+  },
+  async () => {
+    debugLog("[Tool] Executing tool: list_folders");
+
+    try {
+      const folders = await imapService.listFolders();
+      const formatted = folders
+        .map((f) => {
+          const use = f.specialUse ? ` (${f.specialUse})` : "";
+          return `${f.path}${use} — ${f.messages} messages, ${f.unseen} unread`;
+        })
+        .join("\n");
+
+      return {
+        content: [{ type: "text" as const, text: formatted || "No folders found." }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to list folders: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to list folders: ${sanitizeError(error)}` }],
+        isError: true,
+      };
     }
-
-    default:
-      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
   }
-});
+);
 
-/**
- * Start the server using stdio transport.
- * This allows the server to communicate via standard input/output streams.
- */
+server.registerTool(
+  "list_messages",
+  {
+    description: "List recent messages from an email folder. Returns subject, sender, date, and flags for each message.",
+    inputSchema: {
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder path to list messages from (default: INBOX)"),
+      limit: z.number().int().min(1).max(100).optional().default(20)
+        .describe("Maximum number of messages to return (default: 20, max: 100)"),
+    },
+  },
+  async ({ folder, limit }) => {
+    debugLog(`[Tool] Executing tool: list_messages (folder=${folder}, limit=${limit})`);
+
+    try {
+      const messages = await imapService.listMessages(folder, limit);
+      if (messages.length === 0) {
+        return { content: [{ type: "text" as const, text: `No messages in ${folder}.` }] };
+      }
+
+      const formatted = messages
+        .map((m) => {
+          const flags = m.flags.length > 0 ? ` [${m.flags.join(", ")}]` : "";
+          return `UID ${m.uid} | ${m.date} | From: ${m.from} | ${m.subject}${flags}`;
+        })
+        .join("\n");
+
+      return {
+        content: [{ type: "text" as const, text: `${messages.length} messages in ${folder}:\n\n${formatted}` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to list messages: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to list messages: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "read_message",
+  {
+    description: "Read a specific email message by UID. Returns full headers and body content.",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("Message UID (use list_messages or search_messages to find UIDs)"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder path containing the message (default: INBOX)"),
+    },
+  },
+  async ({ uid, folder }) => {
+    debugLog(`[Tool] Executing tool: read_message (uid=${uid}, folder=${folder})`);
+
+    try {
+      const msg = await imapService.readMessage(folder, uid);
+      const parts: string[] = [
+        `Subject: ${msg.subject}`,
+        `From: ${msg.from}`,
+        `To: ${msg.to}`,
+        msg.cc ? `CC: ${msg.cc}` : "",
+        `Date: ${msg.date}`,
+        `Message-ID: ${msg.messageId}`,
+        `Flags: ${msg.flags.join(", ") || "none"}`,
+        "",
+        "--- Body ---",
+        msg.text || msg.html || "(no content)",
+      ].filter(Boolean);
+
+      return {
+        content: [{ type: "text" as const, text: parts.join("\n") }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to read message: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to read message: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "search_messages",
+  {
+    description: "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries.",
+    inputSchema: {
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder to search in (default: INBOX)"),
+      from: z.string().optional()
+        .describe("Filter by sender email address or name"),
+      to: z.string().optional()
+        .describe("Filter by recipient email address"),
+      subject: z.string().optional()
+        .describe("Filter by subject (substring match)"),
+      body: z.string().optional()
+        .describe("Filter by body content (substring match)"),
+      since: z.string().optional()
+        .describe("Messages since this date (YYYY-MM-DD)"),
+      before: z.string().optional()
+        .describe("Messages before this date (YYYY-MM-DD)"),
+      seen: z.boolean().optional()
+        .describe("Filter by read status: true=read, false=unread"),
+      flagged: z.boolean().optional()
+        .describe("Filter by flagged/starred status"),
+      limit: z.number().int().min(1).max(100).optional().default(20)
+        .describe("Maximum results to return (default: 20, max: 100)"),
+    },
+  },
+  async ({ folder, from, to, subject, body, since, before, seen, flagged, limit }) => {
+    debugLog(`[Tool] Executing tool: search_messages (folder=${folder})`);
+
+    try {
+      const messages = await imapService.searchMessages(
+        folder,
+        { from, to, subject, body, since, before, seen, flagged },
+        limit,
+      );
+
+      if (messages.length === 0) {
+        return { content: [{ type: "text" as const, text: "No messages found matching your criteria." }] };
+      }
+
+      const formatted = messages
+        .map((m) => {
+          const flags = m.flags.length > 0 ? ` [${m.flags.join(", ")}]` : "";
+          return `UID ${m.uid} | ${m.date} | From: ${m.from} | ${m.subject}${flags}`;
+        })
+        .join("\n");
+
+      return {
+        content: [{ type: "text" as const, text: `${messages.length} messages found:\n\n${formatted}` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to search messages: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to search messages: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ─── Server Startup ─────────────────────────────────────────────────────────
+
 async function main() {
-  debugLog("[Setup] Starting Protonmail MCP server...");
-  
+  debugLog("[Setup] Starting Proton Mail MCP server...");
+
+  // Non-fatal SMTP verification — warn but continue so the server stays up
   try {
-    // Verify SMTP connection on startup
     await emailService.verifyConnection();
-    
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    
-    debugLog("[Setup] Protonmail MCP server started successfully");
   } catch (error) {
-    console.error(`[Error] Server startup failed: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(1);
+    console.error(`[Warning] SMTP verification failed, will retry on first send: ${sanitizeError(error)}`);
   }
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+
+  debugLog("[Setup] Proton Mail MCP server started successfully");
 }
 
 // Set up error handling

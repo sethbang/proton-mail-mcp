@@ -1,4 +1,5 @@
-import nodemailer from 'nodemailer';
+import nodemailer from "nodemailer";
+import type SentMessageInfo from "nodemailer/lib/smtp-transport/index.js";
 
 /**
  * Interface for email configuration
@@ -12,6 +13,9 @@ export interface EmailConfig {
     pass: string;
   };
   debug?: boolean;
+  connectionTimeout?: number;
+  greetingTimeout?: number;
+  socketTimeout?: number;
 }
 
 /**
@@ -24,6 +28,25 @@ export interface EmailMessage {
   isHtml?: boolean;
   cc?: string;
   bcc?: string;
+  replyTo?: string;
+  fromName?: string;
+}
+
+/**
+ * Strip HTML tags and decode common entities to produce a plaintext fallback.
+ */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -40,49 +63,55 @@ export class EmailService {
    */
   constructor(config: EmailConfig) {
     this.debug = config.debug || false;
-    
+
     if (this.debug) {
-      console.error('[Setup] Initializing email service...');
+      console.error("[Setup] Initializing email service...");
     }
-    
+
     this.fromEmail = config.auth.user;
     this.transporter = nodemailer.createTransport({
       host: config.host,
       port: config.port,
-      secure: config.secure, // true for 465, false for other ports
+      secure: config.secure,
       auth: {
         user: config.auth.user,
         pass: config.auth.pass,
       },
+      connectionTimeout: config.connectionTimeout ?? 30_000,
+      greetingTimeout: config.greetingTimeout ?? 30_000,
+      socketTimeout: config.socketTimeout ?? 60_000,
     });
   }
 
   /**
    * Send an email
    * @param message Email message to send
-   * @returns Promise resolving to the send result
+   * @returns Promise resolving to the nodemailer send info
    */
-  async sendEmail(message: EmailMessage): Promise<{ success: boolean; info: any }> {
+  async sendEmail(message: EmailMessage): Promise<SentMessageInfo> {
     if (this.debug) {
       console.error(`[Email] Sending email to: ${message.to}`);
     }
-    
+
     try {
+      const from = message.fromName ? `"${message.fromName}" <${this.fromEmail}>` : this.fromEmail;
       const info = await this.transporter.sendMail({
-        from: this.fromEmail,
+        from,
         to: message.to,
         cc: message.cc,
         bcc: message.bcc,
+        replyTo: message.replyTo,
         subject: message.subject,
-        text: !message.isHtml ? message.body : undefined,
+        text: message.isHtml ? stripHtml(message.body) : message.body,
         html: message.isHtml ? message.body : undefined,
       });
-      
+
       if (this.debug) {
         console.error(`[Email] Email sent successfully: ${info.messageId}`);
       }
-      return { success: true, info };
+      return info;
     } catch (error) {
+      // Error is logged here for diagnostics; caller (index.ts) sanitizes before returning to MCP client
       console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
@@ -90,19 +119,17 @@ export class EmailService {
 
   /**
    * Verify SMTP connection
-   * @returns Promise resolving to true if connection is successful
    */
-  async verifyConnection(): Promise<boolean> {
+  async verifyConnection(): Promise<void> {
     if (this.debug) {
-      console.error('[Setup] Verifying SMTP connection...');
+      console.error("[Setup] Verifying SMTP connection...");
     }
-    
+
     try {
       await this.transporter.verify();
       if (this.debug) {
-        console.error('[Setup] SMTP connection verified successfully');
+        console.error("[Setup] SMTP connection verified successfully");
       }
-      return true;
     } catch (error) {
       console.error(`[Error] SMTP connection verification failed: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
