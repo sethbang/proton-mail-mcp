@@ -6,10 +6,13 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gi
 
 ## Features
 
-- **Send email** via Proton Mail SMTP (direct or through Proton Mail Bridge)
+- **Send, reply, and forward** email via Proton Mail SMTP with threading headers
 - **Read email** via IMAP through [Proton Mail Bridge](https://proton.me/mail/bridge)
+- **Attachments** -- send files (base64) and download attachments from received messages
 - **Search** messages by sender, recipient, subject, body, date, and flags
+- **Organize** -- move, delete, and flag/unflag messages
 - **List folders** with message and unread counts
+- **Security hardened** -- input validation, credential sanitization, rate limiting, attachment size limits
 - Works with any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.)
 
 ## Prerequisites
@@ -50,7 +53,9 @@ Add the following to your client's MCP server configuration:
 
 ## Tools
 
-### `send_email`
+### Sending
+
+#### `send_email`
 
 Send an email using Proton Mail SMTP.
 
@@ -64,30 +69,72 @@ Send an email using Proton Mail SMTP.
 | `bcc` | No | BCC recipient(s), comma-separated |
 | `replyTo` | No | Reply-To address |
 | `fromName` | No | Display name for the From field |
+| `attachments` | No | Array of `{filename, content, contentType}` (base64-encoded content) |
 
-### `list_folders`
+#### `reply_email`
+
+Reply to a message with proper threading headers (In-Reply-To, References).
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | UID of the message to reply to |
+| `body` | Yes | Reply body content |
+| `folder` | No | Folder containing the original message (default: `INBOX`) |
+| `isHtml` | No | Whether `body` is HTML (default: `false`) |
+| `cc` | No | Additional CC recipients, comma-separated |
+| `bcc` | No | BCC recipients, comma-separated |
+| `replyAll` | No | Reply to all recipients instead of just sender (default: `false`) |
+
+#### `forward_email`
+
+Forward a message to new recipients with threading headers.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | UID of the message to forward |
+| `to` | Yes | Recipient address(es), comma-separated |
+| `folder` | No | Folder containing the original message (default: `INBOX`) |
+| `body` | No | Optional message to prepend above the forwarded content |
+| `isHtml` | No | Whether `body` is HTML (default: `false`) |
+| `cc` | No | CC recipients, comma-separated |
+| `bcc` | No | BCC recipients, comma-separated |
+
+### Reading
+
+#### `list_folders`
 
 List all mailbox folders with message and unread counts. No parameters.
 
-### `list_messages`
+#### `list_messages`
 
-List recent messages from a folder.
+List recent messages from a folder. Supports UID-based pagination.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `folder` | No | Folder path (default: `INBOX`) |
 | `limit` | No | Max messages to return, 1-100 (default: `20`) |
+| `beforeUid` | No | Fetch messages with UIDs before this value (for pagination) |
 
-### `read_message`
+#### `read_message`
 
-Read a specific message by UID. Returns full headers and body.
+Read a specific message by UID. Returns full headers, body, and attachment metadata.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `uid` | Yes | Message UID (from `list_messages` or `search_messages`) |
 | `folder` | No | Folder path (default: `INBOX`) |
 
-### `search_messages`
+#### `download_attachment`
+
+Download an attachment by MIME part number. Use `read_message` first to see available attachments. Returns base64-encoded content.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | Message UID |
+| `partNumber` | Yes | MIME part number (from `read_message` output) |
+| `folder` | No | Folder containing the message (default: `INBOX`) |
+
+#### `search_messages`
 
 Search messages by various criteria.
 
@@ -103,6 +150,38 @@ Search messages by various criteria.
 | `seen` | No | `true` = read, `false` = unread |
 | `flagged` | No | Filter by flagged/starred status |
 | `limit` | No | Max results, 1-100 (default: `20`) |
+
+### Organizing
+
+#### `move_message`
+
+Move a message to a different folder.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | Message UID |
+| `destination` | Yes | Destination folder path (e.g. `Archive`, `Trash`, `Spam`) |
+| `folder` | No | Source folder (default: `INBOX`) |
+
+#### `delete_message`
+
+Permanently delete a message.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | Message UID |
+| `folder` | No | Folder containing the message (default: `INBOX`) |
+
+#### `update_message_flags`
+
+Add or remove flags on a message. Common flags: `\Seen` (read), `\Flagged` (starred), `\Answered`, `\Draft`, `\Deleted`.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | Message UID |
+| `folder` | No | Folder containing the message (default: `INBOX`) |
+| `flagsToAdd` | No | Flags to add (e.g. `["\\Seen", "\\Flagged"]`) |
+| `flagsToRemove` | No | Flags to remove (e.g. `["\\Seen"]`) |
 
 ## Configuration
 
