@@ -40,8 +40,9 @@ export interface MessageDetail {
   date: string;
   messageId: string;
   flags: string[];
-  text: string;
-  html: string;
+  body: string;
+  bodyFormat: "text" | "html-stripped" | "html";
+  truncated: boolean;
   attachments: AttachmentMeta[];
 }
 
@@ -56,6 +57,47 @@ export interface FolderInfo {
 function formatAddress(addr?: MessageAddressObject[]): string {
   if (!addr || addr.length === 0) return "";
   return addr.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address || "")).join(", ");
+}
+
+/** Default maximum body length in characters returned by readMessage. */
+const DEFAULT_MAX_BODY_LENGTH = 50_000;
+
+/**
+ * Find the MIME part number for a given content type in a bodyStructure tree.
+ * Returns the first match (depth-first).
+ */
+function findPartNumber(structure: MessageStructureObject, targetType: string): string | undefined {
+  if (structure.type === targetType && structure.part) return structure.part;
+  if (structure.childNodes) {
+    for (const child of structure.childNodes) {
+      const found = findPartNumber(child, targetType);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Strip HTML tags and decode common HTML entities to produce readable plain text.
+ */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -160,8 +202,12 @@ export class ImapService {
           }
         }
 
-        // Return newest first
-        messages.reverse();
+        // Sort newest first by date, falling back to UID descending
+        messages.sort((a, b) => {
+          const da = a.date ? new Date(a.date).getTime() : 0;
+          const db = b.date ? new Date(b.date).getTime() : 0;
+          return da !== db ? db - da : b.uid - a.uid;
+        });
         return messages;
       } finally {
         lock.release();
@@ -173,15 +219,30 @@ export class ImapService {
 
   /**
    * Read a single message by UID, including body content.
+   *
+   * Uses `client.download()` to fetch body parts, which automatically decodes
+   * quoted-printable and base64 transfer encodings.
+   *
+   * Prefers text/plain when available. Falls back to text/html with tags
+   * stripped. Pass `preferHtml: true` to get raw HTML instead.
+   *
+   * Body is truncated to `maxBodyLength` characters (default 50 000).
    */
-  async readMessage(folder: string, uid: number): Promise<MessageDetail> {
+  async readMessage(
+    folder: string,
+    uid: number,
+    options?: { preferHtml?: boolean; maxBodyLength?: number },
+  ): Promise<MessageDetail> {
     validateFolderPath(folder);
+    const preferHtml = options?.preferHtml ?? false;
+    const maxLen = options?.maxBodyLength ?? DEFAULT_MAX_BODY_LENGTH;
     this.log(`[IMAP] Reading message UID ${uid} from ${folder}`);
     const client = this.createClient();
     try {
       await client.connect();
       const lock = await client.getMailboxLock(folder);
       try {
+        // Step 1: fetch metadata and structure (no body content yet)
         const msg = await client.fetchOne(
           String(uid),
           {
@@ -189,7 +250,6 @@ export class ImapService {
             envelope: true,
             flags: true,
             bodyStructure: true,
-            bodyParts: ["TEXT", "1"],
           },
           { uid: true },
         );
@@ -198,18 +258,33 @@ export class ImapService {
           throw new Error(`Message UID ${uid} not found in ${folder}`);
         }
 
-        const textPart = msg.bodyParts?.get("TEXT") || msg.bodyParts?.get("1");
-        const textContent = textPart ? textPart.toString("utf-8") : "";
+        const attachments = msg.bodyStructure ? ImapService.extractAttachments(msg.bodyStructure) : [];
 
-        let text = "";
-        let html = "";
-        if (msg.bodyStructure && ImapService.hasHtmlPart(msg.bodyStructure)) {
-          html = textContent;
-        } else {
-          text = textContent;
+        // Step 2: determine which part to download
+        let body = "";
+        let bodyFormat: "text" | "html-stripped" | "html" = "text";
+
+        const textPartNum = msg.bodyStructure ? findPartNumber(msg.bodyStructure, "text/plain") : undefined;
+        const htmlPartNum = msg.bodyStructure ? findPartNumber(msg.bodyStructure, "text/html") : undefined;
+
+        if (preferHtml && htmlPartNum) {
+          body = await this.downloadPart(client, uid, htmlPartNum);
+          bodyFormat = "html";
+        } else if (textPartNum) {
+          body = await this.downloadPart(client, uid, textPartNum);
+          bodyFormat = "text";
+        } else if (htmlPartNum) {
+          const rawHtml = await this.downloadPart(client, uid, htmlPartNum);
+          body = stripHtml(rawHtml);
+          bodyFormat = "html-stripped";
         }
 
-        const attachments = msg.bodyStructure ? ImapService.extractAttachments(msg.bodyStructure) : [];
+        // Step 3: truncate if needed
+        let truncated = false;
+        if (body.length > maxLen) {
+          body = body.slice(0, maxLen);
+          truncated = true;
+        }
 
         return {
           uid: msg.uid,
@@ -220,8 +295,9 @@ export class ImapService {
           date: msg.envelope?.date?.toISOString() || "",
           messageId: msg.envelope?.messageId || "",
           flags: msg.flags ? [...msg.flags] : [],
-          text,
-          html,
+          body,
+          bodyFormat,
+          truncated,
           attachments,
         };
       } finally {
@@ -230,6 +306,18 @@ export class ImapService {
     } finally {
       await client.logout().catch(() => {});
     }
+  }
+
+  /**
+   * Download a single MIME part as a decoded UTF-8 string.
+   */
+  private async downloadPart(client: ImapFlow, uid: number, partNumber: string): Promise<string> {
+    const { content } = await client.download(String(uid), partNumber, { uid: true });
+    const chunks: Buffer[] = [];
+    for await (const chunk of content) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString("utf-8");
   }
 
   /**
@@ -286,7 +374,12 @@ export class ImapService {
           messages.push(this.toSummary(msg));
         }
 
-        messages.reverse();
+        // Sort newest first by date, falling back to UID descending
+        messages.sort((a, b) => {
+          const da = a.date ? new Date(a.date).getTime() : 0;
+          const db = b.date ? new Date(b.date).getTime() : 0;
+          return da !== db ? db - da : b.uid - a.uid;
+        });
         return messages;
       } finally {
         lock.release();
@@ -360,14 +453,6 @@ export class ImapService {
     } finally {
       await client.logout().catch(() => {});
     }
-  }
-
-  private static hasHtmlPart(structure: MessageStructureObject): boolean {
-    if (structure.type === "text/html") return true;
-    if (structure.childNodes) {
-      return structure.childNodes.some((child) => ImapService.hasHtmlPart(child));
-    }
-    return false;
   }
 
   /**

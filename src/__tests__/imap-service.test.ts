@@ -239,6 +239,56 @@ describe("ImapService", () => {
       expect(result[1].uid).toBe(20);
     });
 
+    it("sorts by date even when UIDs arrive out of order", async () => {
+      mockStatus.mockResolvedValueOnce({ messages: 3 });
+
+      const messages = [
+        {
+          uid: 121,
+          envelope: {
+            subject: "Middle by date",
+            from: [{ address: "a@example.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-12T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 100,
+          envelope: {
+            subject: "Newest by date",
+            from: [{ address: "b@example.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-15T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 110,
+          envelope: {
+            subject: "Oldest by date",
+            from: [{ address: "c@example.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-10T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 10);
+
+      expect(result[0].subject).toBe("Newest by date");
+      expect(result[1].subject).toBe("Middle by date");
+      expect(result[2].subject).toBe("Oldest by date");
+    });
+
     it("returns empty array when beforeUid search finds no results", async () => {
       mockSearch.mockResolvedValueOnce([]);
 
@@ -249,7 +299,16 @@ describe("ImapService", () => {
   });
 
   describe("readMessage", () => {
-    it("reads plain text message", async () => {
+    function mockDownloadPart(text: string) {
+      mockDownload.mockResolvedValueOnce({
+        meta: {},
+        content: (async function* () {
+          yield Buffer.from(text);
+        })(),
+      });
+    }
+
+    it("reads plain text message via download()", async () => {
       mockFetchOne.mockResolvedValueOnce({
         uid: 42,
         envelope: {
@@ -262,8 +321,8 @@ describe("ImapService", () => {
         },
         flags: new Set(["\\Seen"]),
         bodyStructure: { type: "text/plain", part: "1" },
-        bodyParts: new Map([["TEXT", Buffer.from("Hello, this is the body.")]]),
       });
+      mockDownloadPart("Hello, this is the body.");
 
       const service = new ImapService(baseConfig);
       const msg = await service.readMessage("INBOX", 42);
@@ -271,19 +330,21 @@ describe("ImapService", () => {
       expect(msg.uid).toBe(42);
       expect(msg.subject).toBe("Test Subject");
       expect(msg.from).toBe("Sender <sender@example.com>");
-      expect(msg.text).toBe("Hello, this is the body.");
-      expect(msg.html).toBe("");
+      expect(msg.body).toBe("Hello, this is the body.");
+      expect(msg.bodyFormat).toBe("text");
+      expect(msg.truncated).toBe(false);
+      expect(mockDownload).toHaveBeenCalledWith("42", "1", { uid: true });
     });
 
-    it("reads HTML message", async () => {
+    it("prefers text/plain over HTML in multipart/alternative", async () => {
       mockFetchOne.mockResolvedValueOnce({
         uid: 43,
         envelope: {
-          subject: "HTML Email",
+          subject: "Multi",
           from: [{ address: "sender@example.com" }],
           to: [{ address: "me@pm.me" }],
           date: new Date("2026-04-15T12:00:00Z"),
-          messageId: "<html123@example.com>",
+          messageId: "<multi@example.com>",
         },
         flags: new Set(),
         bodyStructure: {
@@ -293,19 +354,96 @@ describe("ImapService", () => {
             { type: "text/html", part: "2" },
           ],
         },
-        bodyParts: new Map([["TEXT", Buffer.from("<html><body><p>Hello</p></body></html>")]]),
       });
+      mockDownloadPart("Plain text version");
 
       const service = new ImapService(baseConfig);
       const msg = await service.readMessage("INBOX", 43);
 
-      expect(msg.text).toBe("");
-      expect(msg.html).toBe("<html><body><p>Hello</p></body></html>");
+      expect(msg.body).toBe("Plain text version");
+      expect(msg.bodyFormat).toBe("text");
+      // Should download part "1" (text/plain), not "2" (text/html)
+      expect(mockDownload).toHaveBeenCalledWith("43", "1", { uid: true });
+    });
+
+    it("strips HTML when only HTML part exists", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 44,
+        envelope: {
+          subject: "HTML Only",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<html@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/html", part: "1" },
+      });
+      mockDownloadPart("<html><body><p>Hello</p><p>World</p></body></html>");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 44);
+
+      expect(msg.bodyFormat).toBe("html-stripped");
+      expect(msg.body).not.toContain("<");
+      expect(msg.body).toContain("Hello");
+      expect(msg.body).toContain("World");
+    });
+
+    it("returns raw HTML when preferHtml is true", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 45,
+        envelope: {
+          subject: "HTML Pref",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<htmlpref@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/alternative",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            { type: "text/html", part: "2" },
+          ],
+        },
+      });
+      mockDownloadPart("<p>Raw HTML</p>");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 45, { preferHtml: true });
+
+      expect(msg.body).toBe("<p>Raw HTML</p>");
+      expect(msg.bodyFormat).toBe("html");
+      expect(mockDownload).toHaveBeenCalledWith("45", "2", { uid: true });
+    });
+
+    it("truncates body to maxBodyLength", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 46,
+        envelope: {
+          subject: "Long",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<long@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain", part: "1" },
+      });
+      mockDownloadPart("A".repeat(1000));
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 46, { maxBodyLength: 100 });
+
+      expect(msg.body).toHaveLength(100);
+      expect(msg.truncated).toBe(true);
     });
 
     it("extracts attachment metadata from bodyStructure", async () => {
       mockFetchOne.mockResolvedValueOnce({
-        uid: 44,
+        uid: 47,
         envelope: {
           subject: "With Attachment",
           from: [{ address: "sender@example.com" }],
@@ -327,11 +465,11 @@ describe("ImapService", () => {
             },
           ],
         },
-        bodyParts: new Map([["TEXT", Buffer.from("See attached.")]]),
       });
+      mockDownloadPart("See attached.");
 
       const service = new ImapService(baseConfig);
-      const msg = await service.readMessage("INBOX", 44);
+      const msg = await service.readMessage("INBOX", 47);
 
       expect(msg.attachments).toHaveLength(1);
       expect(msg.attachments[0]).toEqual({
@@ -340,40 +478,19 @@ describe("ImapService", () => {
         contentType: "application/pdf",
         size: 12345,
       });
-      expect(msg.text).toBe("See attached.");
-    });
-
-    it("falls back to bodyParts '1' when 'TEXT' is absent", async () => {
-      mockFetchOne.mockResolvedValueOnce({
-        uid: 47,
-        envelope: {
-          subject: "Fallback",
-          from: [{ address: "sender@example.com" }],
-          to: [{ address: "me@pm.me" }],
-          date: new Date("2026-04-15T12:00:00Z"),
-          messageId: "<fb@example.com>",
-        },
-        flags: new Set(),
-        bodyStructure: { type: "text/plain", part: "1" },
-        bodyParts: new Map([["1", Buffer.from("From part 1")]]),
-      });
-
-      const service = new ImapService(baseConfig);
-      const msg = await service.readMessage("INBOX", 47);
-      expect(msg.text).toBe("From part 1");
+      expect(msg.body).toBe("See attached.");
     });
 
     it("handles missing envelope fields with defaults", async () => {
       mockFetchOne.mockResolvedValueOnce({
-        uid: 45,
+        uid: 48,
         envelope: {},
         flags: undefined,
         bodyStructure: undefined,
-        bodyParts: new Map(),
       });
 
       const service = new ImapService(baseConfig);
-      const msg = await service.readMessage("INBOX", 45);
+      const msg = await service.readMessage("INBOX", 48);
 
       expect(msg.subject).toBe("");
       expect(msg.from).toBe("");
@@ -382,14 +499,14 @@ describe("ImapService", () => {
       expect(msg.date).toBe("");
       expect(msg.messageId).toBe("");
       expect(msg.flags).toEqual([]);
-      expect(msg.text).toBe("");
-      expect(msg.html).toBe("");
+      expect(msg.body).toBe("");
+      expect(msg.bodyFormat).toBe("text");
       expect(msg.attachments).toEqual([]);
     });
 
     it("extracts inline non-text parts as attachments", async () => {
       mockFetchOne.mockResolvedValueOnce({
-        uid: 46,
+        uid: 49,
         envelope: {
           subject: "Inline Image",
           from: [{ address: "sender@example.com" }],
@@ -411,11 +528,11 @@ describe("ImapService", () => {
             },
           ],
         },
-        bodyParts: new Map([["TEXT", Buffer.from("<img src='cid:logo'>")]]),
       });
+      mockDownloadPart("<img src='cid:logo'>");
 
       const service = new ImapService(baseConfig);
-      const msg = await service.readMessage("INBOX", 46);
+      const msg = await service.readMessage("INBOX", 49);
 
       expect(msg.attachments).toHaveLength(1);
       expect(msg.attachments[0]).toEqual({
@@ -424,7 +541,8 @@ describe("ImapService", () => {
         contentType: "image/png",
         size: 5000,
       });
-      expect(msg.html).toBe("<img src='cid:logo'>");
+      // HTML-only message without preferHtml → stripped
+      expect(msg.bodyFormat).toBe("html-stripped");
     });
 
     it("throws when message not found", async () => {

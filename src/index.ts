@@ -99,7 +99,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // Validate comma-separated email addresses, rejecting dangerous characters
@@ -389,7 +389,7 @@ if (!READONLY)
 
         const subject = /^fwd:/i.test(original.subject) ? original.subject : `Fwd: ${original.subject}`;
 
-        const originalContent = original.text || original.html || "(no content)";
+        const originalContent = original.body || "(no content)";
         const separator = "\n\n---------- Forwarded message ----------\n";
         const originalHeaders = `From: ${original.from}\nDate: ${original.date}\nSubject: ${original.subject}\nTo: ${original.to}\n\n`;
         const fullBody = body
@@ -519,18 +519,32 @@ server.registerTool(
 server.registerTool(
   "read_message",
   {
-    description: "Read a specific email message by UID. Returns full headers and body content.",
+    description:
+      "Read a specific email message by UID. Returns headers and body content. By default prefers the plain-text part and strips HTML tags from HTML-only messages. Body is truncated to avoid exceeding token limits (default 50 000 chars).",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
       folder: z.string().optional().default("INBOX").describe("Folder path containing the message (default: INBOX)"),
+      preferHtml: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Return raw HTML instead of stripping tags (default: false — returns plain text or stripped HTML)"),
+      maxBodyLength: z
+        .number()
+        .int()
+        .min(100)
+        .max(500_000)
+        .optional()
+        .default(50_000)
+        .describe("Maximum body length in characters before truncation (default: 50000)"),
     },
   },
-  async ({ uid, folder }) => {
+  async ({ uid, folder, preferHtml, maxBodyLength }) => {
     debugLog(`[Tool] Executing tool: read_message (uid=${uid}, folder=${folder})`);
 
     try {
-      const msg = await imapService.readMessage(folder, uid);
+      const msg = await imapService.readMessage(folder, uid, { preferHtml, maxBodyLength });
       const parts: string[] = [
         `Subject: ${msg.subject}`,
         `From: ${msg.from}`,
@@ -550,8 +564,12 @@ server.registerTool(
       }
 
       parts.push("");
-      parts.push("--- Body ---");
-      parts.push(msg.text || msg.html || "(no content)");
+      parts.push(`--- Body (${msg.bodyFormat}${msg.truncated ? ", truncated" : ""}) ---`);
+      parts.push(msg.body || "(no content)");
+
+      if (msg.truncated) {
+        parts.push(`\n[Body truncated at ${maxBodyLength} characters. Use a larger maxBodyLength to see more.]`);
+      }
 
       return {
         content: [{ type: "text" as const, text: parts.join("\n") }],
@@ -610,7 +628,7 @@ server.registerTool(
   "search_messages",
   {
     description:
-      "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries.",
+      "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries. Note: recently sent or received messages may take a few seconds to become searchable by subject or body due to server-side indexing delays; searching by 'from' is typically immediate.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       folder: z.string().optional().default("INBOX").describe("Folder to search in (default: INBOX)"),
@@ -672,7 +690,8 @@ if (!READONLY)
   server.registerTool(
     "move_message",
     {
-      description: "Move an email message to a different folder",
+      description:
+        "Move an email message to a different folder. Note: the message gets a new UID in the destination folder — the original UID is no longer valid after the move.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       inputSchema: {
         uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
@@ -714,7 +733,7 @@ if (!READONLY)
     "delete_message",
     {
       description:
-        "Delete an email message. By default moves to Trash for safety; set permanent=true to permanently expunge.",
+        "Delete an email message. By default moves to Trash for safety; set permanent=true to permanently expunge. Note: moving to Trash assigns a new UID in the Trash folder — the original UID is no longer valid.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
         uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
