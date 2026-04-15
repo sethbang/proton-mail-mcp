@@ -65,9 +65,12 @@ const DEFAULT_MAX_BODY_LENGTH = 50_000;
 /**
  * Find the MIME part number for a given content type in a bodyStructure tree.
  * Returns the first match (depth-first).
+ *
+ * Single-part messages have no `part` field on the root node — IMAP
+ * implicitly treats those as part "1".
  */
 function findPartNumber(structure: MessageStructureObject, targetType: string): string | undefined {
-  if (structure.type === targetType && structure.part) return structure.part;
+  if (structure.type === targetType) return structure.part || "1";
   if (structure.childNodes) {
     for (const child of structure.childNodes) {
       const found = findPartNumber(child, targetType);
@@ -277,6 +280,15 @@ export class ImapService {
           const rawHtml = await this.downloadPart(client, uid, htmlPartNum);
           body = stripHtml(rawHtml);
           bodyFormat = "html-stripped";
+        } else if (msg.bodyStructure) {
+          // Fallback: no text/plain or text/html found (e.g. PGP-encrypted).
+          // Download part "1" as raw text so we return *something* rather than empty.
+          try {
+            body = await this.downloadPart(client, uid, "1");
+            bodyFormat = "text";
+          } catch {
+            // Part "1" may not exist or may not be downloadable — leave body empty
+          }
         }
 
         // Step 3: truncate if needed

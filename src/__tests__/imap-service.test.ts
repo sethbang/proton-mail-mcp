@@ -441,6 +441,59 @@ describe("ImapService", () => {
       expect(msg.truncated).toBe(true);
     });
 
+    it("reads single-part text/plain with no part field on root structure", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 50,
+        envelope: {
+          subject: "Simple plain text",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<simple@example.com>",
+        },
+        flags: new Set(),
+        // Single-part messages: type is text/plain but no `part` field
+        bodyStructure: { type: "text/plain" },
+      });
+      mockDownloadPart("Hello with em\u2014dash and caf\u00e9");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 50);
+
+      expect(msg.body).toBe("Hello with em\u2014dash and caf\u00e9");
+      expect(msg.bodyFormat).toBe("text");
+      // Should default to part "1" when root has no part field
+      expect(mockDownload).toHaveBeenCalledWith("50", "1", { uid: true });
+    });
+
+    it("falls back to part 1 when no text/plain or text/html found (e.g. PGP)", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 51,
+        envelope: {
+          subject: "Encrypted message",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<pgp@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/encrypted",
+          childNodes: [
+            { type: "application/pgp-encrypted", part: "1" },
+            { type: "application/octet-stream", part: "2" },
+          ],
+        },
+      });
+      mockDownloadPart("-----BEGIN PGP MESSAGE-----\nsome encrypted content\n-----END PGP MESSAGE-----");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 51);
+
+      expect(msg.body).toContain("BEGIN PGP MESSAGE");
+      expect(msg.bodyFormat).toBe("text");
+    });
+
     it("extracts attachment metadata from bodyStructure", async () => {
       mockFetchOne.mockResolvedValueOnce({
         uid: 47,

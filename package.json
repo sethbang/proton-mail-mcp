@@ -1,6 +1,6 @@
 {
   "name": "proton-mail-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server for Proton Mail — send, read, and search email over SMTP and IMAP",
   "repository": {
     "type": "git",
