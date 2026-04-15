@@ -44,9 +44,24 @@ const baseConfig: ImapConfig = {
   auth: { user: "test@pm.me", pass: "test-bridge-password" },
 };
 
+const debugConfig: ImapConfig = { ...baseConfig, debug: true };
+
 describe("ImapService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe("debug logging", () => {
+    it("logs to stderr when debug is true", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockList.mockResolvedValueOnce([]);
+
+      const service = new ImapService(debugConfig);
+      await service.listFolders();
+
+      expect(spy).toHaveBeenCalledWith("[IMAP] Listing folders");
+      spy.mockRestore();
+    });
   });
 
   describe("listFolders", () => {
@@ -70,6 +85,23 @@ describe("ImapService", () => {
       });
       expect(mockConnect).toHaveBeenCalled();
       expect(mockLogout).toHaveBeenCalled();
+    });
+
+    it("handles folders with missing status fields", async () => {
+      mockList.mockResolvedValueOnce([
+        { path: "INBOX", name: "Inbox", specialUse: "", status: undefined },
+        { path: "Drafts", name: "Drafts", specialUse: undefined, status: { messages: undefined, unseen: undefined } },
+      ]);
+
+      const service = new ImapService(baseConfig);
+      const folders = await service.listFolders();
+
+      expect(folders[0]).toEqual({
+        path: "INBOX", name: "Inbox", specialUse: "", messages: 0, unseen: 0,
+      });
+      expect(folders[1]).toEqual({
+        path: "Drafts", name: "Drafts", specialUse: "", messages: 0, unseen: 0,
+      });
     });
 
     it("handles empty mailbox list", async () => {
@@ -130,6 +162,28 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10);
       expect(result).toEqual([]);
+    });
+
+    it("handles messages with missing envelope fields", async () => {
+      mockStatus.mockResolvedValueOnce({ messages: 1 });
+
+      mockFetch.mockReturnValueOnce((async function* () {
+        yield {
+          uid: 1,
+          envelope: {},
+          flags: undefined,
+        };
+      })());
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 10);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].subject).toBe("");
+      expect(result[0].from).toBe("");
+      expect(result[0].to).toBe("");
+      expect(result[0].date).toBe("");
+      expect(result[0].flags).toEqual([]);
     });
 
     it("paginates with beforeUid parameter", async () => {
@@ -275,6 +329,90 @@ describe("ImapService", () => {
       expect(msg.text).toBe("See attached.");
     });
 
+    it("falls back to bodyParts '1' when 'TEXT' is absent", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 47,
+        envelope: {
+          subject: "Fallback",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<fb@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain", part: "1" },
+        bodyParts: new Map([["1", Buffer.from("From part 1")]]),
+      });
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 47);
+      expect(msg.text).toBe("From part 1");
+    });
+
+    it("handles missing envelope fields with defaults", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 45,
+        envelope: {},
+        flags: undefined,
+        bodyStructure: undefined,
+        bodyParts: new Map(),
+      });
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 45);
+
+      expect(msg.subject).toBe("");
+      expect(msg.from).toBe("");
+      expect(msg.to).toBe("");
+      expect(msg.cc).toBe("");
+      expect(msg.date).toBe("");
+      expect(msg.messageId).toBe("");
+      expect(msg.flags).toEqual([]);
+      expect(msg.text).toBe("");
+      expect(msg.html).toBe("");
+      expect(msg.attachments).toEqual([]);
+    });
+
+    it("extracts inline non-text parts as attachments", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 46,
+        envelope: {
+          subject: "Inline Image",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<inline123@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/related",
+          childNodes: [
+            { type: "text/html", part: "1" },
+            {
+              type: "image/png",
+              part: "2",
+              disposition: "inline",
+              parameters: { name: "logo.png" },
+              size: 5000,
+            },
+          ],
+        },
+        bodyParts: new Map([["TEXT", Buffer.from("<img src='cid:logo'>")]]),
+      });
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 46);
+
+      expect(msg.attachments).toHaveLength(1);
+      expect(msg.attachments[0]).toEqual({
+        partNumber: "2",
+        filename: "logo.png",
+        contentType: "image/png",
+        size: 5000,
+      });
+      expect(msg.html).toBe("<img src='cid:logo'>");
+    });
+
     it("throws when message not found", async () => {
       mockFetchOne.mockResolvedValueOnce(false);
 
@@ -357,6 +495,22 @@ describe("ImapService", () => {
       expect(result.contentType).toBe("application/pdf");
       expect(Buffer.from(result.content, "base64").toString()).toBe("PDF file contents here");
       expect(mockDownload).toHaveBeenCalledWith("42", "2", { uid: true });
+    });
+
+    it("concatenates multiple stream chunks", async () => {
+      mockDownload.mockResolvedValueOnce({
+        meta: { contentType: "text/plain", filename: "big.txt" },
+        content: (async function* () {
+          yield Buffer.from("chunk1-");
+          yield Buffer.from("chunk2-");
+          yield Buffer.from("chunk3");
+        })(),
+      });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.downloadAttachment("INBOX", 42, "1");
+
+      expect(Buffer.from(result.content, "base64").toString()).toBe("chunk1-chunk2-chunk3");
     });
 
     it("handles missing metadata gracefully", async () => {

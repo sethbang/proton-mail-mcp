@@ -50,6 +50,13 @@ describe("EmailService", () => {
       );
     });
 
+    it("logs initialization when debug is true", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      new EmailService({ ...baseConfig, debug: true });
+      expect(spy).toHaveBeenCalledWith("[Setup] Initializing email service...");
+      spy.mockRestore();
+    });
+
     it("applies timeout defaults", () => {
       new EmailService(baseConfig);
       expect(nodemailer.createTransport).toHaveBeenCalledWith(
@@ -201,6 +208,36 @@ describe("EmailService", () => {
       expect(call.attachments[0].content.toString()).toBe("hello world");
     });
 
+    it("logs send and success when debug is true", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const service = new EmailService({ ...baseConfig, debug: true });
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Debug Test",
+        body: "Hello",
+      });
+
+      expect(spy).toHaveBeenCalledWith("[Email] Sending email to: recipient@example.com");
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining("[Email] Email sent successfully:"));
+      spy.mockRestore();
+    });
+
+    it("strips HTML entities in plaintext fallback", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Entity Test",
+        body: "<p>&nbsp;&amp;&lt;&gt;&quot;</p><br/><p>line2</p>",
+        isHtml: true,
+      });
+
+      const call = mock.sendMail.mock.calls[0][0];
+      expect(call.text).toBe('&<>"\n\nline2');
+    });
+
     it("re-throws errors from sendMail", async () => {
       const service = new EmailService(baseConfig);
       const mock = getTransporterMock();
@@ -216,6 +253,15 @@ describe("EmailService", () => {
     it("resolves without error on success", async () => {
       const service = new EmailService(baseConfig);
       await expect(service.verifyConnection()).resolves.toBeUndefined();
+    });
+
+    it("logs verification when debug is true", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const service = new EmailService({ ...baseConfig, debug: true });
+      await service.verifyConnection();
+      expect(spy).toHaveBeenCalledWith("[Setup] Verifying SMTP connection...");
+      expect(spy).toHaveBeenCalledWith("[Setup] SMTP connection verified successfully");
+      spy.mockRestore();
     });
 
     it("re-throws on verification failure", async () => {
