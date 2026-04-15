@@ -97,10 +97,18 @@ describe("ImapService", () => {
       const folders = await service.listFolders();
 
       expect(folders[0]).toEqual({
-        path: "INBOX", name: "Inbox", specialUse: "", messages: 0, unseen: 0,
+        path: "INBOX",
+        name: "Inbox",
+        specialUse: "",
+        messages: 0,
+        unseen: 0,
       });
       expect(folders[1]).toEqual({
-        path: "Drafts", name: "Drafts", specialUse: "", messages: 0, unseen: 0,
+        path: "Drafts",
+        name: "Drafts",
+        specialUse: "",
+        messages: 0,
+        unseen: 0,
       });
     });
 
@@ -140,9 +148,11 @@ describe("ImapService", () => {
         },
       ];
 
-      mockFetch.mockReturnValueOnce((async function* () {
-        for (const m of messages) yield m;
-      })());
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
 
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10);
@@ -167,13 +177,15 @@ describe("ImapService", () => {
     it("handles messages with missing envelope fields", async () => {
       mockStatus.mockResolvedValueOnce({ messages: 1 });
 
-      mockFetch.mockReturnValueOnce((async function* () {
-        yield {
-          uid: 1,
-          envelope: {},
-          flags: undefined,
-        };
-      })());
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            uid: 1,
+            envelope: {},
+            flags: undefined,
+          };
+        })(),
+      );
 
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10);
@@ -212,9 +224,11 @@ describe("ImapService", () => {
         },
       ];
 
-      mockFetch.mockReturnValueOnce((async function* () {
-        for (const m of messages) yield m;
-      })());
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
 
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 2, 30);
@@ -425,37 +439,36 @@ describe("ImapService", () => {
     it("searches by criteria and returns results", async () => {
       mockSearch.mockResolvedValueOnce([10, 20, 30]);
 
-      mockFetch.mockReturnValueOnce((async function* () {
-        yield {
-          uid: 30,
-          envelope: {
-            subject: "Match 3",
-            from: [{ address: "alice@example.com" }],
-            to: [{ address: "me@pm.me" }],
-            date: new Date("2026-04-15T12:00:00Z"),
-          },
-          flags: new Set(),
-        };
-        yield {
-          uid: 20,
-          envelope: {
-            subject: "Match 2",
-            from: [{ address: "alice@example.com" }],
-            to: [{ address: "me@pm.me" }],
-            date: new Date("2026-04-14T12:00:00Z"),
-          },
-          flags: new Set(["\\Flagged"]),
-        };
-      })());
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            uid: 30,
+            envelope: {
+              subject: "Match 3",
+              from: [{ address: "alice@example.com" }],
+              to: [{ address: "me@pm.me" }],
+              date: new Date("2026-04-15T12:00:00Z"),
+            },
+            flags: new Set(),
+          };
+          yield {
+            uid: 20,
+            envelope: {
+              subject: "Match 2",
+              from: [{ address: "alice@example.com" }],
+              to: [{ address: "me@pm.me" }],
+              date: new Date("2026-04-14T12:00:00Z"),
+            },
+            flags: new Set(["\\Flagged"]),
+          };
+        })(),
+      );
 
       const service = new ImapService(baseConfig);
       const result = await service.searchMessages("INBOX", { from: "alice@example.com" }, 10);
 
       expect(result).toHaveLength(2);
-      expect(mockSearch).toHaveBeenCalledWith(
-        expect.objectContaining({ from: "alice@example.com" }),
-        { uid: true },
-      );
+      expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ from: "alice@example.com" }), { uid: true });
     });
 
     it("returns empty array when no matches", async () => {
@@ -566,6 +579,58 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.deleteMessage("INBOX", 42);
       expect(result).toBe(false);
+    });
+  });
+
+  describe("folder path validation", () => {
+    it("rejects folder names with control characters", async () => {
+      const service = new ImapService(baseConfig);
+      await expect(service.listMessages("IN\r\nBOX", 10)).rejects.toThrow("invalid control characters");
+      await expect(service.readMessage("IN\x00BOX", 1)).rejects.toThrow("invalid control characters");
+      await expect(service.searchMessages("IN\r\nBOX", {}, 10)).rejects.toThrow("invalid control characters");
+      await expect(service.deleteMessage("IN\x00BOX", 1)).rejects.toThrow("invalid control characters");
+      await expect(service.updateFlags("IN\r\nBOX", 1, [], [])).rejects.toThrow("invalid control characters");
+    });
+
+    it("rejects invalid folder in moveMessage for both source and destination", async () => {
+      const service = new ImapService(baseConfig);
+      await expect(service.moveMessage("IN\r\nBOX", 1, "Archive")).rejects.toThrow("invalid control characters");
+      await expect(service.moveMessage("INBOX", 1, "Arch\x00ive")).rejects.toThrow("invalid control characters");
+    });
+
+    it("rejects invalid folder in downloadAttachment", async () => {
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("IN\r\nBOX", 1, "1")).rejects.toThrow("invalid control characters");
+    });
+  });
+
+  describe("partNumber validation", () => {
+    it("rejects invalid part numbers in downloadAttachment", async () => {
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("INBOX", 1, "../../etc/passwd")).rejects.toThrow(
+        "Invalid MIME part number",
+      );
+      await expect(service.downloadAttachment("INBOX", 1, "abc")).rejects.toThrow("Invalid MIME part number");
+      await expect(service.downloadAttachment("INBOX", 1, "")).rejects.toThrow("Invalid MIME part number");
+    });
+  });
+
+  describe("attachment size limit", () => {
+    it("aborts download when attachment exceeds max size", async () => {
+      const destroyFn = vi.fn();
+      const largeChunk = Buffer.alloc(1024 * 1024); // 1MB chunks
+      mockDownload.mockResolvedValueOnce({
+        meta: { contentType: "application/octet-stream", filename: "huge.bin" },
+        content: Object.assign(
+          (async function* () {
+            for (let i = 0; i < 30; i++) yield largeChunk; // 30MB total
+          })(),
+          { destroy: destroyFn },
+        ),
+      });
+
+      const service = new ImapService({ ...baseConfig, maxAttachmentSize: 10 * 1024 * 1024 }); // 10MB limit
+      await expect(service.downloadAttachment("INBOX", 42, "2")).rejects.toThrow("exceeds maximum size");
     });
   });
 

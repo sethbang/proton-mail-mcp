@@ -195,9 +195,7 @@ describe("EmailService", () => {
         to: "recipient@example.com",
         subject: "Test",
         body: "See attached",
-        attachments: [
-          { filename: "test.txt", content: base64Content, contentType: "text/plain" },
-        ],
+        attachments: [{ filename: "test.txt", content: base64Content, contentType: "text/plain" }],
       });
 
       const call = mock.sendMail.mock.calls[0][0];
@@ -238,14 +236,52 @@ describe("EmailService", () => {
       expect(call.text).toBe('&<>"\n\nline2');
     });
 
+    it("strips CRLF and angle brackets from fromName to prevent header injection", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Test",
+        body: "Hello",
+        fromName: "Evil\r\nBcc: attacker@evil.com",
+      });
+
+      expect(mock.sendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: '"EvilBcc: attacker@evil.com" <test@protonmail.com>',
+        }),
+      );
+    });
+
+    it("sanitizes path traversal from attachment filenames", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+      const base64Content = Buffer.from("data").toString("base64");
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Test",
+        body: "See attached",
+        attachments: [
+          { filename: "../../etc/passwd", content: base64Content, contentType: "text/plain" },
+          { filename: "normal.txt", content: base64Content, contentType: "text/plain" },
+        ],
+      });
+
+      const call = mock.sendMail.mock.calls[0][0];
+      expect(call.attachments[0].filename).toBe("passwd");
+      expect(call.attachments[1].filename).toBe("normal.txt");
+    });
+
     it("re-throws errors from sendMail", async () => {
       const service = new EmailService(baseConfig);
       const mock = getTransporterMock();
       mock.sendMail.mockRejectedValueOnce(new Error("SMTP connection refused"));
 
-      await expect(
-        service.sendEmail({ to: "x@example.com", subject: "Test", body: "Test" }),
-      ).rejects.toThrow("SMTP connection refused");
+      await expect(service.sendEmail({ to: "x@example.com", subject: "Test", body: "Test" })).rejects.toThrow(
+        "SMTP connection refused",
+      );
     });
   });
 

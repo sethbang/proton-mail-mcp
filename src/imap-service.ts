@@ -1,10 +1,6 @@
 import { ImapFlow } from "imapflow";
-import type {
-  FetchMessageObject,
-  MessageAddressObject,
-  MessageStructureObject,
-  SearchObject,
-} from "imapflow";
+import type { FetchMessageObject, MessageAddressObject, MessageStructureObject, SearchObject } from "imapflow";
+import { validateFolderPath, validatePartNumber } from "./validation.js";
 
 export interface ImapConfig {
   host: string;
@@ -16,6 +12,7 @@ export interface ImapConfig {
   };
   debug?: boolean;
   connectionTimeout?: number;
+  maxAttachmentSize?: number;
 }
 
 export interface MessageSummary {
@@ -58,9 +55,7 @@ export interface FolderInfo {
 
 function formatAddress(addr?: MessageAddressObject[]): string {
   if (!addr || addr.length === 0) return "";
-  return addr
-    .map((a) => (a.name ? `${a.name} <${a.address}>` : a.address || ""))
-    .join(", ");
+  return addr.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address || "")).join(", ");
 }
 
 /**
@@ -70,10 +65,12 @@ function formatAddress(addr?: MessageAddressObject[]): string {
 export class ImapService {
   private config: ImapConfig;
   private debug: boolean;
+  private maxAttachmentSize: number;
 
   constructor(config: ImapConfig) {
     this.config = config;
     this.debug = config.debug || false;
+    this.maxAttachmentSize = config.maxAttachmentSize ?? 25 * 1024 * 1024;
   }
 
   private createClient(): ImapFlow {
@@ -120,6 +117,7 @@ export class ImapService {
    * List recent messages from a folder.
    */
   async listMessages(folder: string, limit: number, beforeUid?: number): Promise<MessageSummary[]> {
+    validateFolderPath(folder);
     this.log(`[IMAP] Listing messages from ${folder}, limit ${limit}${beforeUid ? `, beforeUid ${beforeUid}` : ""}`);
     const client = this.createClient();
     try {
@@ -135,11 +133,15 @@ export class ImapService {
 
           const selectedUids = result.slice(-limit);
           const fetchRange = selectedUids.join(",");
-          for await (const msg of client.fetch(fetchRange, {
-            uid: true,
-            envelope: true,
-            flags: true,
-          }, { uid: true })) {
+          for await (const msg of client.fetch(
+            fetchRange,
+            {
+              uid: true,
+              envelope: true,
+              flags: true,
+            },
+            { uid: true },
+          )) {
             messages.push(this.toSummary(msg));
           }
         } else {
@@ -173,6 +175,7 @@ export class ImapService {
    * Read a single message by UID, including body content.
    */
   async readMessage(folder: string, uid: number): Promise<MessageDetail> {
+    validateFolderPath(folder);
     this.log(`[IMAP] Reading message UID ${uid} from ${folder}`);
     const client = this.createClient();
     try {
@@ -206,9 +209,7 @@ export class ImapService {
           text = textContent;
         }
 
-        const attachments = msg.bodyStructure
-          ? ImapService.extractAttachments(msg.bodyStructure)
-          : [];
+        const attachments = msg.bodyStructure ? ImapService.extractAttachments(msg.bodyStructure) : [];
 
         return {
           uid: msg.uid,
@@ -248,6 +249,7 @@ export class ImapService {
     },
     limit: number,
   ): Promise<MessageSummary[]> {
+    validateFolderPath(folder);
     this.log(`[IMAP] Searching in ${folder}`);
     const client = this.createClient();
     try {
@@ -272,11 +274,15 @@ export class ImapService {
         const uidRange = selectedUids.join(",");
 
         const messages: MessageSummary[] = [];
-        for await (const msg of client.fetch(uidRange, {
-          uid: true,
-          envelope: true,
-          flags: true,
-        }, { uid: true })) {
+        for await (const msg of client.fetch(
+          uidRange,
+          {
+            uid: true,
+            envelope: true,
+            flags: true,
+          },
+          { uid: true },
+        )) {
           messages.push(this.toSummary(msg));
         }
 
@@ -299,10 +305,7 @@ export class ImapService {
     ) {
       attachments.push({
         partNumber: structure.part || "",
-        filename:
-          structure.dispositionParameters?.filename ||
-          structure.parameters?.name ||
-          "unnamed",
+        filename: structure.dispositionParameters?.filename || structure.parameters?.name || "unnamed",
         contentType: structure.type || "application/octet-stream",
         size: structure.size || 0,
       });
@@ -325,6 +328,8 @@ export class ImapService {
     uid: number,
     partNumber: string,
   ): Promise<{ content: string; contentType: string; filename: string }> {
+    validateFolderPath(folder);
+    validatePartNumber(partNumber);
     this.log(`[IMAP] Downloading attachment part ${partNumber} from UID ${uid} in ${folder}`);
     const client = this.createClient();
     try {
@@ -333,8 +338,15 @@ export class ImapService {
       try {
         const { meta, content } = await client.download(String(uid), partNumber, { uid: true });
         const chunks: Buffer[] = [];
+        let totalSize = 0;
         for await (const chunk of content) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalSize += buf.length;
+          if (totalSize > this.maxAttachmentSize) {
+            content.destroy?.();
+            throw new Error(`Attachment exceeds maximum size of ${this.maxAttachmentSize} bytes`);
+          }
+          chunks.push(buf);
         }
         const fullBuffer = Buffer.concat(chunks);
         return {
@@ -362,6 +374,8 @@ export class ImapService {
    * Move a message to a different folder.
    */
   async moveMessage(folder: string, uid: number, destination: string): Promise<boolean> {
+    validateFolderPath(folder);
+    validateFolderPath(destination);
     this.log(`[IMAP] Moving UID ${uid} from ${folder} to ${destination}`);
     const client = this.createClient();
     try {
@@ -382,6 +396,7 @@ export class ImapService {
    * Permanently delete a message.
    */
   async deleteMessage(folder: string, uid: number): Promise<boolean> {
+    validateFolderPath(folder);
     this.log(`[IMAP] Deleting UID ${uid} from ${folder}`);
     const client = this.createClient();
     try {
@@ -401,6 +416,7 @@ export class ImapService {
    * Add and/or remove flags on a message.
    */
   async updateFlags(folder: string, uid: number, flagsToAdd: string[], flagsToRemove: string[]): Promise<boolean> {
+    validateFolderPath(folder);
     this.log(`[IMAP] Updating flags for UID ${uid} in ${folder}`);
     const client = this.createClient();
     try {

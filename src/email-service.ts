@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type SentMessageInfo from "nodemailer/lib/smtp-transport/index.js";
+import { sanitizeFromName, sanitizeFilename } from "./validation.js";
 
 /**
  * Interface for email configuration
@@ -103,7 +104,7 @@ export class EmailService {
     }
 
     try {
-      const safeName = message.fromName?.replace(/["\\]/g, "") || "";
+      const safeName = message.fromName ? sanitizeFromName(message.fromName) : "";
       const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
       const info = await this.transporter.sendMail({
         from,
@@ -117,7 +118,7 @@ export class EmailService {
         inReplyTo: message.inReplyTo,
         references: message.references,
         attachments: message.attachments?.map((a) => ({
-          filename: a.filename,
+          filename: sanitizeFilename(a.filename),
           content: Buffer.from(a.content, "base64"),
           contentType: a.contentType,
         })),
@@ -148,7 +149,9 @@ export class EmailService {
         console.error("[Setup] SMTP connection verified successfully");
       }
     } catch (error) {
-      console.error(`[Error] SMTP connection verification failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `[Error] SMTP connection verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw error;
     }
   }
