@@ -27,6 +27,13 @@ export interface MessageSummary {
   flags: string[];
 }
 
+export interface AttachmentMeta {
+  partNumber: string;
+  filename: string;
+  contentType: string;
+  size: number;
+}
+
 export interface MessageDetail {
   uid: number;
   subject: string;
@@ -38,6 +45,7 @@ export interface MessageDetail {
   flags: string[];
   text: string;
   html: string;
+  attachments: AttachmentMeta[];
 }
 
 export interface FolderInfo {
@@ -182,6 +190,10 @@ export class ImapService {
           text = textContent;
         }
 
+        const attachments = msg.bodyStructure
+          ? ImapService.extractAttachments(msg.bodyStructure)
+          : [];
+
         return {
           uid: msg.uid,
           subject: msg.envelope?.subject || "",
@@ -193,6 +205,7 @@ export class ImapService {
           flags: msg.flags ? [...msg.flags] : [],
           text,
           html,
+          attachments,
         };
       } finally {
         lock.release();
@@ -253,6 +266,66 @@ export class ImapService {
 
         messages.reverse();
         return messages;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  private static extractAttachments(structure: MessageStructureObject): AttachmentMeta[] {
+    const attachments: AttachmentMeta[] = [];
+
+    if (
+      structure.disposition === "attachment" ||
+      (structure.disposition === "inline" && structure.type && !structure.type.startsWith("text/"))
+    ) {
+      attachments.push({
+        partNumber: structure.part || "",
+        filename:
+          structure.dispositionParameters?.filename ||
+          structure.parameters?.name ||
+          "unnamed",
+        contentType: structure.type || "application/octet-stream",
+        size: structure.size || 0,
+      });
+    }
+
+    if (structure.childNodes) {
+      for (const child of structure.childNodes) {
+        attachments.push(...ImapService.extractAttachments(child));
+      }
+    }
+
+    return attachments;
+  }
+
+  /**
+   * Download an attachment by part number. Returns base64-encoded content.
+   */
+  async downloadAttachment(
+    folder: string,
+    uid: number,
+    partNumber: string,
+  ): Promise<{ content: string; contentType: string; filename: string }> {
+    this.log(`[IMAP] Downloading attachment part ${partNumber} from UID ${uid} in ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const { meta, content } = await client.download(String(uid), partNumber, { uid: true });
+        const chunks: Buffer[] = [];
+        for await (const chunk of content) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        const fullBuffer = Buffer.concat(chunks);
+        return {
+          content: fullBuffer.toString("base64"),
+          contentType: meta.contentType || "application/octet-stream",
+          filename: meta.filename || "unnamed",
+        };
       } finally {
         lock.release();
       }

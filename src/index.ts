@@ -450,10 +450,19 @@ server.registerTool(
         `Date: ${msg.date}`,
         `Message-ID: ${msg.messageId}`,
         `Flags: ${msg.flags.join(", ") || "none"}`,
-        "",
-        "--- Body ---",
-        msg.text || msg.html || "(no content)",
-      ].filter(Boolean);
+      ];
+
+      if (msg.attachments.length > 0) {
+        parts.push("");
+        parts.push(`--- Attachments (${msg.attachments.length}) ---`);
+        for (const att of msg.attachments) {
+          parts.push(`  [${att.partNumber}] ${att.filename} (${att.contentType}, ${att.size} bytes)`);
+        }
+      }
+
+      parts.push("");
+      parts.push("--- Body ---");
+      parts.push(msg.text || msg.html || "(no content)");
 
       return {
         content: [{ type: "text" as const, text: parts.join("\n") }],
@@ -462,6 +471,41 @@ server.registerTool(
       console.error(`[Error] Failed to read message: ${error instanceof Error ? error.message : String(error)}`);
       return {
         content: [{ type: "text" as const, text: `Failed to read message: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "download_attachment",
+  {
+    description: "Download an email attachment by part number. Use read_message first to see available attachments and their part numbers. Returns base64-encoded content.",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("Message UID"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder containing the message (default: INBOX)"),
+      partNumber: z.string().min(1)
+        .describe("MIME part number of the attachment (from read_message output)"),
+    },
+  },
+  async ({ uid, folder, partNumber }) => {
+    debugLog(`[Tool] Executing tool: download_attachment (uid=${uid}, folder=${folder}, part=${partNumber})`);
+
+    try {
+      const attachment = await imapService.downloadAttachment(folder, uid, partNumber);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Attachment: ${attachment.filename} (${attachment.contentType})\nContent (base64):\n${attachment.content}`,
+        }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to download attachment: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to download attachment: ${sanitizeError(error)}` }],
         isError: true,
       };
     }

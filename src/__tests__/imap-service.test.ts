@@ -15,6 +15,7 @@ const mockMessageMove = vi.fn().mockResolvedValue({ uidMap: new Map() });
 const mockMessageDelete = vi.fn().mockResolvedValue(true);
 const mockMessageFlagsAdd = vi.fn().mockResolvedValue(true);
 const mockMessageFlagsRemove = vi.fn().mockResolvedValue(true);
+const mockDownload = vi.fn();
 
 vi.mock("imapflow", () => ({
   ImapFlow: vi.fn().mockImplementation(function () {
@@ -31,6 +32,7 @@ vi.mock("imapflow", () => ({
       messageDelete: mockMessageDelete,
       messageFlagsAdd: mockMessageFlagsAdd,
       messageFlagsRemove: mockMessageFlagsRemove,
+      download: mockDownload,
     };
   }),
 }));
@@ -186,6 +188,46 @@ describe("ImapService", () => {
       expect(msg.html).toBe("<html><body><p>Hello</p></body></html>");
     });
 
+    it("extracts attachment metadata from bodyStructure", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 44,
+        envelope: {
+          subject: "With Attachment",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<att123@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            {
+              type: "application/pdf",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "report.pdf" },
+              size: 12345,
+            },
+          ],
+        },
+        bodyParts: new Map([["TEXT", Buffer.from("See attached.")]]),
+      });
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 44);
+
+      expect(msg.attachments).toHaveLength(1);
+      expect(msg.attachments[0]).toEqual({
+        partNumber: "2",
+        filename: "report.pdf",
+        contentType: "application/pdf",
+        size: 12345,
+      });
+      expect(msg.text).toBe("See attached.");
+    });
+
     it("throws when message not found", async () => {
       mockFetchOne.mockResolvedValueOnce(false);
 
@@ -245,6 +287,44 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.searchMessages("INBOX", { subject: "nonexistent" }, 10);
       expect(result).toEqual([]);
+    });
+  });
+
+  describe("downloadAttachment", () => {
+    it("downloads and returns base64-encoded content", async () => {
+      const fileContent = Buffer.from("PDF file contents here");
+      mockDownload.mockResolvedValueOnce({
+        meta: {
+          contentType: "application/pdf",
+          filename: "report.pdf",
+        },
+        content: (async function* () {
+          yield fileContent;
+        })(),
+      });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.downloadAttachment("INBOX", 42, "2");
+
+      expect(result.filename).toBe("report.pdf");
+      expect(result.contentType).toBe("application/pdf");
+      expect(Buffer.from(result.content, "base64").toString()).toBe("PDF file contents here");
+      expect(mockDownload).toHaveBeenCalledWith("42", "2", { uid: true });
+    });
+
+    it("handles missing metadata gracefully", async () => {
+      mockDownload.mockResolvedValueOnce({
+        meta: {},
+        content: (async function* () {
+          yield Buffer.from("data");
+        })(),
+      });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.downloadAttachment("INBOX", 42, "3");
+
+      expect(result.filename).toBe("unnamed");
+      expect(result.contentType).toBe("application/octet-stream");
     });
   });
 
