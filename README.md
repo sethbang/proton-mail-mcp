@@ -18,7 +18,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gi
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) v22+ (LTS)
+- [Node.js](https://nodejs.org/) v24+
 - A [Proton Mail](https://proton.me/mail) account with an SMTP password ([how to get one](https://proton.me/support/smtp-submission))
 - [Proton Mail Bridge](https://proton.me/mail/bridge) running locally (required for IMAP/read tools)
 
