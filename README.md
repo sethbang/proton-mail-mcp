@@ -1,5 +1,6 @@
 # Proton Mail MCP Server
 
+[![npm version](https://img.shields.io/npm/v/proton-mail-mcp.svg)](https://www.npmjs.com/package/proton-mail-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives AI assistants full access to your Proton Mail account -- send, read, search, and organize email over SMTP and IMAP.
@@ -24,6 +25,31 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gi
 
 ## Quick Start
 
+### Add to your MCP client
+
+Add the following to your client's MCP server configuration (Claude Desktop, Claude Code, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "protonmail": {
+      "command": "npx",
+      "args": ["-y", "proton-mail-mcp"],
+      "env": {
+        "PROTONMAIL_USERNAME": "your-email@protonmail.com",
+        "PROTONMAIL_PASSWORD": "your-smtp-password"
+      }
+    }
+  }
+}
+```
+
+That's it — `npx` will download and run the server automatically. See [Configuration](#configuration) for all available environment variables.
+
+### Install from source
+
+If you prefer to run from a local clone:
+
 ```bash
 git clone https://github.com/sethbang/proton-mail-mcp.git
 cd proton-mail-mcp
@@ -31,11 +57,7 @@ npm install
 npm run build
 ```
 
-Copy `.env.example` to `.env` and fill in your credentials (see [Configuration](#configuration) below).
-
-### Add to your MCP client
-
-Add the following to your client's MCP server configuration:
+Then use this MCP config instead:
 
 ```json
 {
