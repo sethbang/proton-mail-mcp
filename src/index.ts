@@ -146,9 +146,15 @@ server.registerTool(
         .max(200, "From name too long")
         .optional()
         .describe("Display name for the From field"),
+      attachments: z.array(z.object({
+        filename: z.string().min(1).describe("Attachment filename"),
+        content: z.string().min(1).describe("Base64-encoded file content"),
+        contentType: z.string().min(1).describe("MIME type (e.g. application/pdf, image/png)"),
+      })).optional()
+        .describe("File attachments (base64-encoded content)"),
     },
   },
-  async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName }) => {
+  async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName, attachments }) => {
     debugLog(`[Tool] Executing tool: send_email`);
 
     try {
@@ -161,6 +167,7 @@ server.registerTool(
         bcc,
         replyTo,
         fromName,
+        attachments,
       });
 
       return {
@@ -177,6 +184,169 @@ server.registerTool(
           type: "text" as const,
           text: `Failed to send email: ${sanitizeError(error)}`,
         }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "reply_email",
+  {
+    description: "Reply to an email message. Reads the original message and sends a reply with proper threading headers (In-Reply-To, References).",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("UID of the message to reply to"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder containing the original message (default: INBOX)"),
+      body: z.string().min(1).max(500_000)
+        .describe("Reply body content"),
+      isHtml: z.boolean().optional().default(false)
+        .describe("Whether the body contains HTML content"),
+      cc: z.string()
+        .max(10_000)
+        .refine(validateAddresses, "Each CC address must be a valid email")
+        .optional()
+        .describe("Additional CC recipients, separated by commas"),
+      bcc: z.string()
+        .max(10_000)
+        .refine(validateAddresses, "Each BCC address must be a valid email")
+        .optional()
+        .describe("BCC recipients, separated by commas"),
+      replyAll: z.boolean().optional().default(false)
+        .describe("Reply to all recipients (sender + TO + CC) instead of just sender"),
+    },
+  },
+  async ({ uid, folder, body, isHtml, cc, bcc, replyAll }) => {
+    debugLog(`[Tool] Executing tool: reply_email (uid=${uid}, folder=${folder}, replyAll=${replyAll})`);
+
+    try {
+      const original = await imapService.readMessage(folder, uid);
+
+      // Build threading headers
+      const inReplyTo = original.messageId;
+      const references = original.messageId;
+
+      // Build subject
+      const subject = /^re:/i.test(original.subject)
+        ? original.subject
+        : `Re: ${original.subject}`;
+
+      // Build recipients
+      let to = original.from;
+      let replyCC = cc || "";
+
+      if (replyAll) {
+        // Collect original TO and CC, excluding our own address
+        const allRecipients = [original.to, original.cc]
+          .filter(Boolean)
+          .join(", ")
+          .split(",")
+          .map((a) => a.trim())
+          .filter((a) => a && !a.includes(emailConfig.auth.user));
+
+        if (allRecipients.length > 0) {
+          replyCC = replyCC
+            ? `${replyCC}, ${allRecipients.join(", ")}`
+            : allRecipients.join(", ");
+        }
+      }
+
+      await emailService.sendEmail({
+        to,
+        subject,
+        body,
+        isHtml,
+        cc: replyCC || undefined,
+        bcc,
+        inReplyTo,
+        references,
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Reply sent to ${to}${replyCC ? ` with CC to ${replyCC}` : ""}.`,
+        }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to reply: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to reply: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "forward_email",
+  {
+    description: "Forward an email message. Reads the original message and sends it to new recipients with proper threading headers.",
+    inputSchema: {
+      uid: z.number().int().min(1)
+        .describe("UID of the message to forward"),
+      folder: z.string().optional().default("INBOX")
+        .describe("Folder containing the original message (default: INBOX)"),
+      to: z.string()
+        .min(1, "Recipient is required")
+        .max(10_000)
+        .refine(validateAddresses, "Each 'to' address must be a valid email")
+        .describe("Recipient email address(es), separated by commas"),
+      body: z.string().max(500_000).optional().default("")
+        .describe("Optional message to prepend above the forwarded content"),
+      isHtml: z.boolean().optional().default(false)
+        .describe("Whether the body contains HTML content"),
+      cc: z.string()
+        .max(10_000)
+        .refine(validateAddresses, "Each CC address must be a valid email")
+        .optional()
+        .describe("CC recipients, separated by commas"),
+      bcc: z.string()
+        .max(10_000)
+        .refine(validateAddresses, "Each BCC address must be a valid email")
+        .optional()
+        .describe("BCC recipients, separated by commas"),
+    },
+  },
+  async ({ uid, folder, to, body, isHtml, cc, bcc }) => {
+    debugLog(`[Tool] Executing tool: forward_email (uid=${uid}, folder=${folder}, to=${to})`);
+
+    try {
+      const original = await imapService.readMessage(folder, uid);
+
+      const subject = /^fwd:/i.test(original.subject)
+        ? original.subject
+        : `Fwd: ${original.subject}`;
+
+      const originalContent = original.text || original.html || "(no content)";
+      const separator = "\n\n---------- Forwarded message ----------\n";
+      const originalHeaders = `From: ${original.from}\nDate: ${original.date}\nSubject: ${original.subject}\nTo: ${original.to}\n\n`;
+      const fullBody = body
+        ? `${body}${separator}${originalHeaders}${originalContent}`
+        : `${separator}${originalHeaders}${originalContent}`;
+
+      await emailService.sendEmail({
+        to,
+        subject,
+        body: fullBody,
+        isHtml,
+        cc,
+        bcc,
+        inReplyTo: original.messageId,
+        references: original.messageId,
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}.`,
+        }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to forward: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to forward: ${sanitizeError(error)}` }],
         isError: true,
       };
     }

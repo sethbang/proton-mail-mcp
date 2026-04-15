@@ -159,6 +159,48 @@ describe("EmailService", () => {
       expect(result).toEqual({ messageId: "<test-id@protonmail.ch>" });
     });
 
+    it("passes inReplyTo and references headers", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Re: Test",
+        body: "Reply body",
+        inReplyTo: "<original-id@example.com>",
+        references: "<original-id@example.com>",
+      });
+
+      expect(mock.sendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inReplyTo: "<original-id@example.com>",
+          references: "<original-id@example.com>",
+        }),
+      );
+    });
+
+    it("converts base64 attachments to Buffers", async () => {
+      const service = new EmailService(baseConfig);
+      const mock = getTransporterMock();
+      const base64Content = Buffer.from("hello world").toString("base64");
+
+      await service.sendEmail({
+        to: "recipient@example.com",
+        subject: "Test",
+        body: "See attached",
+        attachments: [
+          { filename: "test.txt", content: base64Content, contentType: "text/plain" },
+        ],
+      });
+
+      const call = mock.sendMail.mock.calls[0][0];
+      expect(call.attachments).toHaveLength(1);
+      expect(call.attachments[0].filename).toBe("test.txt");
+      expect(call.attachments[0].contentType).toBe("text/plain");
+      expect(Buffer.isBuffer(call.attachments[0].content)).toBe(true);
+      expect(call.attachments[0].content.toString()).toBe("hello world");
+    });
+
     it("re-throws errors from sendMail", async () => {
       const service = new EmailService(baseConfig);
       const mock = getTransporterMock();

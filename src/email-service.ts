@@ -21,6 +21,12 @@ export interface EmailConfig {
 /**
  * Interface for email message
  */
+export interface EmailAttachment {
+  filename: string;
+  content: string; // base64-encoded
+  contentType: string;
+}
+
 export interface EmailMessage {
   to: string;
   subject: string;
@@ -30,6 +36,9 @@ export interface EmailMessage {
   bcc?: string;
   replyTo?: string;
   fromName?: string;
+  inReplyTo?: string;
+  references?: string | string[];
+  attachments?: EmailAttachment[];
 }
 
 /**
@@ -105,6 +114,13 @@ export class EmailService {
         subject: message.subject,
         text: message.isHtml ? stripHtml(message.body) : message.body,
         html: message.isHtml ? message.body : undefined,
+        inReplyTo: message.inReplyTo,
+        references: message.references,
+        attachments: message.attachments?.map((a) => ({
+          filename: a.filename,
+          content: Buffer.from(a.content, "base64"),
+          contentType: a.contentType,
+        })),
       });
 
       if (this.debug) {
