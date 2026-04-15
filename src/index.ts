@@ -22,6 +22,7 @@ const rawPort = parseInt(process.env.PROTONMAIL_PORT || "587", 10);
 const PROTONMAIL_PORT = Number.isNaN(rawPort) ? 587 : rawPort;
 const PROTONMAIL_SECURE = process.env.PROTONMAIL_SECURE === "true";
 const DEBUG = process.env.DEBUG === "true";
+const READONLY = process.env.READONLY === "true";
 
 // Get environment variables for IMAP configuration (Proton Mail Bridge)
 const IMAP_HOST = process.env.IMAP_HOST || "127.0.0.1";
@@ -122,10 +123,15 @@ const sendRateLimiter = {
 
 // ─── SMTP Tools ─────────────────────────────────────────────────────────────
 
-server.registerTool(
+if (READONLY) {
+  console.error("[Info] READONLY mode enabled — mutating tools (send, reply, forward, move, delete, flags) are disabled.");
+}
+
+if (!READONLY) server.registerTool(
   "send_email",
   {
     description: "Send an email using Proton Mail SMTP",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       to: z
         .string()
@@ -222,11 +228,12 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+if (!READONLY) server.registerTool(
   "reply_email",
   {
     description:
       "Reply to an email message. Reads the original message and sends a reply with proper threading headers (In-Reply-To, References).",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       uid: z.number().int().min(1).describe("UID of the message to reply to"),
       folder: z
@@ -322,11 +329,12 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+if (!READONLY) server.registerTool(
   "forward_email",
   {
     description:
       "Forward an email message. Reads the original message and sends it to new recipients with proper threading headers.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       uid: z.number().int().min(1).describe("UID of the message to forward"),
       folder: z
@@ -418,6 +426,7 @@ server.registerTool(
   "list_folders",
   {
     description: "List available email folders/mailboxes with message counts",
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {},
   },
   async () => {
@@ -450,6 +459,7 @@ server.registerTool(
   {
     description:
       "List recent messages from an email folder. Returns subject, sender, date, and flags for each message.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       folder: z.string().optional().default("INBOX").describe("Folder path to list messages from (default: INBOX)"),
       limit: z
@@ -505,6 +515,7 @@ server.registerTool(
   "read_message",
   {
     description: "Read a specific email message by UID. Returns full headers and body content.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
       folder: z.string().optional().default("INBOX").describe("Folder path containing the message (default: INBOX)"),
@@ -555,6 +566,7 @@ server.registerTool(
   {
     description:
       "Download an email attachment by part number. Use read_message first to see available attachments and their part numbers. Returns base64-encoded content.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID"),
       folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
@@ -594,6 +606,7 @@ server.registerTool(
   {
     description:
       "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       folder: z.string().optional().default("INBOX").describe("Folder to search in (default: INBOX)"),
       from: z.string().optional().describe("Filter by sender email address or name"),
@@ -650,10 +663,11 @@ server.registerTool(
 
 // ─── IMAP Mailbox Management Tools ──────────────────────────────────────────
 
-server.registerTool(
+if (!READONLY) server.registerTool(
   "move_message",
   {
     description: "Move an email message to a different folder",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
       folder: z.string().optional().default("INBOX").describe("Source folder (default: INBOX)"),
@@ -686,34 +700,59 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+if (!READONLY) server.registerTool(
   "delete_message",
   {
-    description: "Permanently delete an email message",
+    description:
+      "Delete an email message. By default moves to Trash for safety; set permanent=true to permanently expunge.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
       folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
+      permanent: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("If true, permanently expunge the message instead of moving to Trash"),
     },
   },
-  async ({ uid, folder }) => {
-    debugLog(`[Tool] Executing tool: delete_message (uid=${uid}, folder=${folder})`);
+  async ({ uid, folder, permanent }) => {
+    debugLog(`[Tool] Executing tool: delete_message (uid=${uid}, folder=${folder}, permanent=${permanent})`);
 
     try {
-      const success = await imapService.deleteMessage(folder, uid);
-      if (!success) {
+      if (permanent) {
+        const success = await imapService.deleteMessage(folder, uid);
+        if (!success) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to delete message UID ${uid} — the server returned no confirmation.`,
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Failed to delete message UID ${uid} — the server returned no confirmation.`,
-            },
-          ],
-          isError: true,
+          content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
+        };
+      } else {
+        const success = await imapService.moveMessage(folder, uid, "Trash");
+        if (!success) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to move message UID ${uid} to Trash — the server returned no confirmation.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to Trash.` }],
         };
       }
-      return {
-        content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
-      };
     } catch (error) {
       console.error(`[Error] Failed to delete message: ${error instanceof Error ? error.message : String(error)}`);
       return {
@@ -724,11 +763,12 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+if (!READONLY) server.registerTool(
   "update_message_flags",
   {
     description:
       "Add or remove flags on an email message. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID"),
       folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),

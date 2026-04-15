@@ -46,6 +46,8 @@ Tests live in `src/__tests__/` and are excluded from the TypeScript build via `t
 
 `DEBUG` — enable verbose stderr logging.
 
+`READONLY` — when `true`, disables all mutating tools (send, reply, forward, move, delete, flags). Only read/search tools are registered.
+
 See `.env.example` for a template.
 
 ## Notes
