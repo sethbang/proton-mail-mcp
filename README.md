@@ -12,6 +12,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gi
 - **Search** messages by sender, recipient, subject, body, date, and flags
 - **Organize** -- move, delete, and flag/unflag messages
 - **List folders** with message and unread counts
+- **Safety first** -- delete moves to Trash by default, read-only mode via `READONLY=true`, MCP tool annotations for client-side confirmation prompts
 - **Security hardened** -- input validation, credential sanitization, rate limiting, attachment size limits
 - Works with any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.)
 
@@ -165,12 +166,13 @@ Move a message to a different folder.
 
 #### `delete_message`
 
-Permanently delete a message.
+Delete a message. By default moves to Trash for safety; set `permanent=true` to permanently expunge.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `uid` | Yes | Message UID |
 | `folder` | No | Folder containing the message (default: `INBOX`) |
+| `permanent` | No | If `true`, permanently expunge instead of moving to Trash (default: `false`) |
 
 #### `update_message_flags`
 
@@ -207,11 +209,12 @@ Add or remove flags on a message. Common flags: `\Seen` (read), `\Flagged` (star
 | `IMAP_USERNAME` | _falls back to SMTP username_ | Bridge username |
 | `IMAP_PASSWORD` | _falls back to SMTP password_ | Bridge password |
 
-**Debug:**
+**Other:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEBUG` | `false` | Enable verbose logging to stderr |
+| `READONLY` | `false` | Disable all mutating tools (send, reply, forward, move, delete, flags) |
 
 ## Development
 
