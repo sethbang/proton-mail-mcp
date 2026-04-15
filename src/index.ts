@@ -395,13 +395,15 @@ server.registerTool(
         .describe("Folder path to list messages from (default: INBOX)"),
       limit: z.number().int().min(1).max(100).optional().default(20)
         .describe("Maximum number of messages to return (default: 20, max: 100)"),
+      beforeUid: z.number().int().min(1).optional()
+        .describe("Fetch messages with UIDs before this value (for pagination). Pass the smallest UID from the previous page."),
     },
   },
-  async ({ folder, limit }) => {
-    debugLog(`[Tool] Executing tool: list_messages (folder=${folder}, limit=${limit})`);
+  async ({ folder, limit, beforeUid }) => {
+    debugLog(`[Tool] Executing tool: list_messages (folder=${folder}, limit=${limit}${beforeUid ? `, beforeUid=${beforeUid}` : ""})`);
 
     try {
-      const messages = await imapService.listMessages(folder, limit);
+      const messages = await imapService.listMessages(folder, limit, beforeUid);
       if (messages.length === 0) {
         return { content: [{ type: "text" as const, text: `No messages in ${folder}.` }] };
       }

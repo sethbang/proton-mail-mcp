@@ -119,27 +119,43 @@ export class ImapService {
   /**
    * List recent messages from a folder.
    */
-  async listMessages(folder: string, limit: number): Promise<MessageSummary[]> {
-    this.log(`[IMAP] Listing messages from ${folder}, limit ${limit}`);
+  async listMessages(folder: string, limit: number, beforeUid?: number): Promise<MessageSummary[]> {
+    this.log(`[IMAP] Listing messages from ${folder}, limit ${limit}${beforeUid ? `, beforeUid ${beforeUid}` : ""}`);
     const client = this.createClient();
     try {
       await client.connect();
       const lock = await client.getMailboxLock(folder);
       try {
-        const status = await client.status(folder, { messages: true });
-        const total = status.messages ?? 0;
-        if (total === 0) return [];
-
-        const start = Math.max(1, total - limit + 1);
-        const range = `${start}:*`;
-
         const messages: MessageSummary[] = [];
-        for await (const msg of client.fetch(range, {
-          uid: true,
-          envelope: true,
-          flags: true,
-        })) {
-          messages.push(this.toSummary(msg));
+
+        if (beforeUid) {
+          const uidRange = `1:${beforeUid - 1}`;
+          const result = await client.search({ uid: uidRange }, { uid: true });
+          if (!result || result.length === 0) return [];
+
+          const selectedUids = result.slice(-limit);
+          const fetchRange = selectedUids.join(",");
+          for await (const msg of client.fetch(fetchRange, {
+            uid: true,
+            envelope: true,
+            flags: true,
+          }, { uid: true })) {
+            messages.push(this.toSummary(msg));
+          }
+        } else {
+          const status = await client.status(folder, { messages: true });
+          const total = status.messages ?? 0;
+          if (total === 0) return [];
+
+          const start = Math.max(1, total - limit + 1);
+          const range = `${start}:*`;
+          for await (const msg of client.fetch(range, {
+            uid: true,
+            envelope: true,
+            flags: true,
+          })) {
+            messages.push(this.toSummary(msg));
+          }
         }
 
         // Return newest first

@@ -131,6 +131,53 @@ describe("ImapService", () => {
       const result = await service.listMessages("INBOX", 10);
       expect(result).toEqual([]);
     });
+
+    it("paginates with beforeUid parameter", async () => {
+      mockSearch.mockResolvedValueOnce([5, 10, 15, 20, 25]);
+
+      const messages = [
+        {
+          uid: 20,
+          envelope: {
+            subject: "Older",
+            from: [{ address: "alice@example.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-10T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 25,
+          envelope: {
+            subject: "Less old",
+            from: [{ address: "bob@example.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-11T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce((async function* () {
+        for (const m of messages) yield m;
+      })());
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 2, 30);
+
+      expect(mockSearch).toHaveBeenCalledWith({ uid: "1:29" }, { uid: true });
+      expect(result).toHaveLength(2);
+      expect(result[0].uid).toBe(25);
+      expect(result[1].uid).toBe(20);
+    });
+
+    it("returns empty array when beforeUid search finds no results", async () => {
+      mockSearch.mockResolvedValueOnce([]);
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 10, 5);
+      expect(result).toEqual([]);
+    });
   });
 
   describe("readMessage", () => {
