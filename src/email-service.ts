@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import type SentMessageInfo from "nodemailer/lib/smtp-transport/index.js";
+import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import { sanitizeFromName, sanitizeFilename } from "./validation.js";
 
 /**
@@ -98,7 +98,7 @@ export class EmailService {
    * @param message Email message to send
    * @returns Promise resolving to the nodemailer send info
    */
-  async sendEmail(message: EmailMessage): Promise<SentMessageInfo> {
+  async sendEmail(message: EmailMessage): Promise<SMTPTransport.SentMessageInfo> {
     if (this.debug) {
       console.error(`[Email] Sending email to: ${message.to}`);
     }

@@ -78,6 +78,8 @@ Then use this MCP config instead:
 
 ### Sending
 
+All send tools return the Message-ID of the sent message in their response, which can be used to locate the message via IMAP search.
+
 #### `send_email`
 
 Send an email using Proton Mail SMTP.
@@ -96,7 +98,7 @@ Send an email using Proton Mail SMTP.
 
 #### `reply_email`
 
-Reply to a message with proper threading headers (In-Reply-To, References).
+Reply to a message with proper threading headers (In-Reply-To, References). Includes the quoted original message with attribution by default.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -107,6 +109,7 @@ Reply to a message with proper threading headers (In-Reply-To, References).
 | `cc` | No | Additional CC recipients, comma-separated |
 | `bcc` | No | BCC recipients, comma-separated |
 | `replyAll` | No | Reply to all recipients instead of just sender (default: `false`) |
+| `includeQuote` | No | Include quoted original message below reply (default: `true`) |
 
 #### `forward_email`
 
@@ -140,12 +143,14 @@ List recent messages from a folder. Supports UID-based pagination.
 
 #### `read_message`
 
-Read a specific message by UID. Returns full headers, body, and attachment metadata.
+Read a specific message by UID. Returns full headers, body, and attachment metadata. Prefers plain text; strips HTML tags from HTML-only messages.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `uid` | Yes | Message UID (from `list_messages` or `search_messages`) |
 | `folder` | No | Folder path (default: `INBOX`) |
+| `preferHtml` | No | Return raw HTML instead of stripped text (default: `false`) |
+| `maxBodyLength` | No | Max body length before truncation, 100-500000 (default: `50000`) |
 
 #### `download_attachment`
 
@@ -178,7 +183,7 @@ Search messages by various criteria.
 
 #### `move_message`
 
-Move a message to a different folder.
+Move a message to a different folder. Returns the new UID in the destination folder when available (requires UIDPLUS server support).
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -188,7 +193,7 @@ Move a message to a different folder.
 
 #### `delete_message`
 
-Delete a message. By default moves to Trash for safety; set `permanent=true` to permanently expunge.
+Delete a message. By default moves to Trash for safety; set `permanent=true` to permanently expunge. Returns the new UID in Trash when available.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|

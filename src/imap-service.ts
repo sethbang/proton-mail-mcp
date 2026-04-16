@@ -43,7 +43,14 @@ export interface MessageDetail {
   body: string;
   bodyFormat: "text" | "html-stripped" | "html";
   truncated: boolean;
+  originalLength?: number;
   attachments: AttachmentMeta[];
+}
+
+export interface MoveResult {
+  success: boolean;
+  newUid?: number;
+  destination: string;
 }
 
 export interface FolderInfo {
@@ -190,17 +197,20 @@ export class ImapService {
             messages.push(this.toSummary(msg));
           }
         } else {
-          const status = await client.status(folder, { messages: true });
-          const total = status.messages ?? 0;
-          if (total === 0) return [];
+          const result = await client.search({ all: true }, { uid: true });
+          if (!result || result.length === 0) return [];
 
-          const start = Math.max(1, total - limit + 1);
-          const range = `${start}:*`;
-          for await (const msg of client.fetch(range, {
-            uid: true,
-            envelope: true,
-            flags: true,
-          })) {
+          const selectedUids = result.slice(-limit);
+          const fetchRange = selectedUids.join(",");
+          for await (const msg of client.fetch(
+            fetchRange,
+            {
+              uid: true,
+              envelope: true,
+              flags: true,
+            },
+            { uid: true },
+          )) {
             messages.push(this.toSummary(msg));
           }
         }
@@ -293,7 +303,9 @@ export class ImapService {
 
         // Step 3: truncate if needed
         let truncated = false;
+        let originalLength: number | undefined;
         if (body.length > maxLen) {
+          originalLength = body.length;
           body = body.slice(0, maxLen);
           truncated = true;
         }
@@ -310,6 +322,7 @@ export class ImapService {
           body,
           bodyFormat,
           truncated,
+          originalLength,
           attachments,
         };
       } finally {
@@ -470,7 +483,7 @@ export class ImapService {
   /**
    * Move a message to a different folder.
    */
-  async moveMessage(folder: string, uid: number, destination: string): Promise<boolean> {
+  async moveMessage(folder: string, uid: number, destination: string): Promise<MoveResult> {
     validateFolderPath(folder);
     validateFolderPath(destination);
     this.log(`[IMAP] Moving UID ${uid} from ${folder} to ${destination}`);
@@ -480,7 +493,11 @@ export class ImapService {
       const lock = await client.getMailboxLock(folder);
       try {
         const result = await client.messageMove(String(uid), destination, { uid: true });
-        return result !== false;
+        if (result === false) {
+          return { success: false, destination };
+        }
+        const newUid = result.uidMap?.get(uid);
+        return { success: true, newUid, destination };
       } finally {
         lock.release();
       }

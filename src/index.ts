@@ -99,7 +99,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "0.2.1",
+  version: "0.3.0",
 });
 
 // Validate comma-separated email addresses, rejecting dangerous characters
@@ -195,7 +195,7 @@ if (!READONLY)
       }
 
       try {
-        await emailService.sendEmail({
+        const info = await emailService.sendEmail({
           to,
           subject,
           body,
@@ -211,7 +211,7 @@ if (!READONLY)
           content: [
             {
               type: "text" as const,
-              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}.`,
+              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}. (Message-ID: ${info.messageId})`,
             },
           ],
         };
@@ -264,9 +264,14 @@ if (!READONLY)
           .optional()
           .default(false)
           .describe("Reply to all recipients (sender + TO + CC) instead of just sender"),
+        includeQuote: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Include quoted original message below reply body (default: true)"),
       },
     },
-    async ({ uid, folder, body, isHtml, cc, bcc, replyAll }) => {
+    async ({ uid, folder, body, isHtml, cc, bcc, replyAll, includeQuote }) => {
       debugLog(`[Tool] Executing tool: reply_email (uid=${uid}, folder=${folder}, replyAll=${replyAll})`);
 
       if (!sendRateLimiter.check()) {
@@ -304,10 +309,20 @@ if (!READONLY)
           }
         }
 
-        await emailService.sendEmail({
+        // Build body with optional quoted original
+        let fullBody = body;
+        if (includeQuote && original.body) {
+          const quotedLines = original.body
+            .split("\n")
+            .map((line) => `> ${line}`)
+            .join("\n");
+          fullBody = `${body}\n\nOn ${original.date}, ${original.from} wrote:\n${quotedLines}`;
+        }
+
+        const info = await emailService.sendEmail({
           to,
           subject,
-          body,
+          body: fullBody,
           isHtml,
           cc: replyCC || undefined,
           bcc,
@@ -319,7 +334,7 @@ if (!READONLY)
           content: [
             {
               type: "text" as const,
-              text: `Reply sent to ${to}${replyCC ? ` with CC to ${replyCC}` : ""}.`,
+              text: `Reply sent to ${to}${replyCC ? ` with CC to ${replyCC}` : ""}. (Message-ID: ${info.messageId})`,
             },
           ],
         };
@@ -396,7 +411,7 @@ if (!READONLY)
           ? `${body}${separator}${originalHeaders}${originalContent}`
           : `${separator}${originalHeaders}${originalContent}`;
 
-        await emailService.sendEmail({
+        const info = await emailService.sendEmail({
           to,
           subject,
           body: fullBody,
@@ -411,7 +426,7 @@ if (!READONLY)
           content: [
             {
               type: "text" as const,
-              text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}.`,
+              text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}. (Message-ID: ${info.messageId})`,
             },
           ],
         };
@@ -568,7 +583,10 @@ server.registerTool(
       parts.push(msg.body || "(no content)");
 
       if (msg.truncated) {
-        parts.push(`\n[Body truncated at ${maxBodyLength} characters. Use a larger maxBodyLength to see more.]`);
+        const totalInfo = msg.originalLength ? ` of ${msg.originalLength}` : "";
+        parts.push(
+          `\n[Body truncated at ${maxBodyLength}${totalInfo} characters. Use maxBodyLength=${msg.originalLength ?? maxBodyLength * 2} to see more.]`,
+        );
       }
 
       return {
@@ -703,8 +721,8 @@ if (!READONLY)
       debugLog(`[Tool] Executing tool: move_message (uid=${uid}, ${folder} → ${destination})`);
 
       try {
-        const success = await imapService.moveMessage(folder, uid, destination);
-        if (!success) {
+        const result = await imapService.moveMessage(folder, uid, destination);
+        if (!result.success) {
           return {
             content: [
               {
@@ -715,8 +733,11 @@ if (!READONLY)
             isError: true,
           };
         }
+        const newUidInfo = result.newUid ? ` New UID: ${result.newUid}.` : "";
         return {
-          content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to ${destination}.` }],
+          content: [
+            { type: "text" as const, text: `Message UID ${uid} moved from ${folder} to ${destination}.${newUidInfo}` },
+          ],
         };
       } catch (error) {
         console.error(`[Error] Failed to move message: ${error instanceof Error ? error.message : String(error)}`);
@@ -766,8 +787,8 @@ if (!READONLY)
             content: [{ type: "text" as const, text: `Message UID ${uid} permanently deleted from ${folder}.` }],
           };
         } else {
-          const success = await imapService.moveMessage(folder, uid, "Trash");
-          if (!success) {
+          const result = await imapService.moveMessage(folder, uid, "Trash");
+          if (!result.success) {
             return {
               content: [
                 {
@@ -778,8 +799,11 @@ if (!READONLY)
               isError: true,
             };
           }
+          const newUidInfo = result.newUid ? ` New UID in Trash: ${result.newUid}.` : "";
           return {
-            content: [{ type: "text" as const, text: `Message UID ${uid} moved from ${folder} to Trash.` }],
+            content: [
+              { type: "text" as const, text: `Message UID ${uid} moved from ${folder} to Trash.${newUidInfo}` },
+            ],
           };
         }
       } catch (error) {

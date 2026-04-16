@@ -122,7 +122,7 @@ describe("ImapService", () => {
 
   describe("listMessages", () => {
     it("returns messages in reverse order (newest first)", async () => {
-      mockStatus.mockResolvedValueOnce({ messages: 50 });
+      mockSearch.mockResolvedValueOnce([48, 50]);
 
       // Simulate async generator
       const messages = [
@@ -157,6 +157,7 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10);
 
+      expect(mockSearch).toHaveBeenCalledWith({ all: true }, { uid: true });
       expect(result).toHaveLength(2);
       // Newest first
       expect(result[0].uid).toBe(50);
@@ -167,7 +168,7 @@ describe("ImapService", () => {
     });
 
     it("returns empty array for empty folder", async () => {
-      mockStatus.mockResolvedValueOnce({ messages: 0 });
+      mockSearch.mockResolvedValueOnce([]);
 
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10);
@@ -175,7 +176,7 @@ describe("ImapService", () => {
     });
 
     it("handles messages with missing envelope fields", async () => {
-      mockStatus.mockResolvedValueOnce({ messages: 1 });
+      mockSearch.mockResolvedValueOnce([1]);
 
       mockFetch.mockReturnValueOnce(
         (async function* () {
@@ -240,7 +241,7 @@ describe("ImapService", () => {
     });
 
     it("sorts by date even when UIDs arrive out of order", async () => {
-      mockStatus.mockResolvedValueOnce({ messages: 3 });
+      mockSearch.mockResolvedValueOnce([100, 110, 121]);
 
       const messages = [
         {
@@ -333,6 +334,7 @@ describe("ImapService", () => {
       expect(msg.body).toBe("Hello, this is the body.");
       expect(msg.bodyFormat).toBe("text");
       expect(msg.truncated).toBe(false);
+      expect(msg.originalLength).toBeUndefined();
       expect(mockDownload).toHaveBeenCalledWith("42", "1", { uid: true });
     });
 
@@ -439,6 +441,7 @@ describe("ImapService", () => {
 
       expect(msg.body).toHaveLength(100);
       expect(msg.truncated).toBe(true);
+      expect(msg.originalLength).toBe(1000);
     });
 
     it("reads single-part text/plain with no part field on root structure", async () => {
@@ -714,22 +717,33 @@ describe("ImapService", () => {
   });
 
   describe("moveMessage", () => {
-    it("moves message and returns true on success", async () => {
+    it("moves message and returns MoveResult with new UID on success", async () => {
+      mockMessageMove.mockResolvedValueOnce({ uidMap: new Map([[42, 100]]) });
+
       const service = new ImapService(baseConfig);
       const result = await service.moveMessage("INBOX", 42, "Archive");
 
-      expect(result).toBe(true);
+      expect(result).toEqual({ success: true, newUid: 100, destination: "Archive" });
       expect(mockMessageMove).toHaveBeenCalledWith("42", "Archive", { uid: true });
       expect(mockConnect).toHaveBeenCalled();
       expect(mockLogout).toHaveBeenCalled();
     });
 
-    it("returns false when server returns false", async () => {
+    it("returns success without newUid when uidMap is empty", async () => {
+      mockMessageMove.mockResolvedValueOnce({ uidMap: new Map() });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.moveMessage("INBOX", 42, "Archive");
+
+      expect(result).toEqual({ success: true, newUid: undefined, destination: "Archive" });
+    });
+
+    it("returns failure when server returns false", async () => {
       mockMessageMove.mockResolvedValueOnce(false);
 
       const service = new ImapService(baseConfig);
       const result = await service.moveMessage("INBOX", 42, "Archive");
-      expect(result).toBe(false);
+      expect(result).toEqual({ success: false, destination: "Archive" });
     });
   });
 
