@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import { sanitizeFromName, sanitizeFilename } from "./validation.js";
 
@@ -133,6 +134,33 @@ export class EmailService {
       console.error(`[Error] Failed to send email: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
+  }
+
+  /**
+   * Build a raw RFC 5322 message without sending it.
+   * Used for IMAP APPEND (e.g. saving drafts).
+   */
+  async buildRawMessage(message: EmailMessage): Promise<Buffer> {
+    const safeName = message.fromName ? sanitizeFromName(message.fromName) : "";
+    const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
+    const composer = new MailComposer({
+      from,
+      to: message.to,
+      cc: message.cc,
+      bcc: message.bcc,
+      replyTo: message.replyTo,
+      subject: message.subject,
+      text: message.isHtml ? stripHtml(message.body) : message.body,
+      html: message.isHtml ? message.body : undefined,
+      inReplyTo: message.inReplyTo,
+      references: message.references,
+      attachments: message.attachments?.map((a) => ({
+        filename: sanitizeFilename(a.filename),
+        content: Buffer.from(a.content, "base64"),
+        contentType: a.contentType,
+      })),
+    });
+    return composer.compile().build();
   }
 
   /**

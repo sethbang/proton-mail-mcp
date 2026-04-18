@@ -99,7 +99,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "0.3.0",
+  version: "0.4.0",
 });
 
 // Validate comma-separated email addresses, rejecting dangerous characters
@@ -207,11 +207,22 @@ if (!READONLY)
           attachments,
         });
 
+        // Best-effort: try to find the sent copy UID in the Sent folder
+        let sentUidInfo = "";
+        try {
+          if (info.messageId) {
+            const sentUid = await imapService.findByMessageId("Sent", info.messageId);
+            if (sentUid) sentUidInfo = ` Sent copy UID: ${sentUid} in Sent.`;
+          }
+        } catch {
+          // Non-fatal — indexing delay or folder name mismatch
+        }
+
         return {
           content: [
             {
               type: "text" as const,
-              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}. (Message-ID: ${info.messageId})`,
+              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}. (Message-ID: ${info.messageId})${sentUidInfo}`,
             },
           ],
         };
@@ -478,7 +489,7 @@ server.registerTool(
   "list_messages",
   {
     description:
-      "List recent messages from an email folder. Returns subject, sender, date, and flags for each message.",
+      "List recent messages from an email folder, sorted by date (newest first). Returns subject, sender, date, and flags for each message.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       folder: z.string().optional().default("INBOX").describe("Folder path to list messages from (default: INBOX)"),
@@ -646,7 +657,7 @@ server.registerTool(
   "search_messages",
   {
     description:
-      "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries. Note: recently sent or received messages may take a few seconds to become searchable by subject or body due to server-side indexing delays; searching by 'from' is typically immediate.",
+      "Search for messages in a folder by various criteria (sender, subject, date, flags). Returns matching message summaries sorted by date (newest first). Note: recently sent or received messages may take a few seconds to become searchable by subject or body due to server-side indexing delays; searching by 'from' is typically immediate.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       folder: z.string().optional().default("INBOX").describe("Folder to search in (default: INBOX)"),
@@ -872,6 +883,159 @@ if (!READONLY)
         console.error(`[Error] Failed to update flags: ${error instanceof Error ? error.message : String(error)}`);
         return {
           content: [{ type: "text" as const, text: `Failed to update flags: ${sanitizeError(error)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+// ─── Thread & Bulk Tools ───────────────────────────────────────────────────
+
+server.registerTool(
+  "get_thread",
+  {
+    description:
+      "Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first). Searches within a single folder.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      uid: z.number().int().min(1).describe("UID of any message in the thread"),
+      folder: z.string().optional().default("INBOX").describe("Folder to search in (default: INBOX)"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .default(25)
+        .describe("Maximum messages to return (default: 25, max: 50)"),
+    },
+  },
+  async ({ uid, folder, limit }) => {
+    debugLog(`[Tool] Executing tool: get_thread (uid=${uid}, folder=${folder})`);
+
+    try {
+      const messages = await imapService.getThread(folder, uid, limit);
+      if (messages.length === 0) {
+        return { content: [{ type: "text" as const, text: "No thread messages found." }] };
+      }
+
+      const formatted = messages
+        .map((m) => {
+          const flags = m.flags.length > 0 ? ` [${m.flags.join(", ")}]` : "";
+          return `UID ${m.uid} | ${m.date} | From: ${m.from} | ${m.subject}${flags}`;
+        })
+        .join("\n");
+
+      return {
+        content: [{ type: "text" as const, text: `${messages.length} messages in thread:\n\n${formatted}` }],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to get thread: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to get thread: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+if (!READONLY)
+  server.registerTool(
+    "mark_all_read",
+    {
+      description:
+        "Mark all unread messages in a folder as read. Optionally limit to messages older than a given date.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        folder: z.string().optional().default("INBOX").describe("Folder to mark as read (default: INBOX)"),
+        olderThan: z.string().optional().describe("Only mark messages before this date as read (YYYY-MM-DD)"),
+      },
+    },
+    async ({ folder, olderThan }) => {
+      debugLog(`[Tool] Executing tool: mark_all_read (folder=${folder})`);
+
+      try {
+        const count = await imapService.markAllRead(folder, olderThan);
+        if (count === 0) {
+          return {
+            content: [{ type: "text" as const, text: `No unread messages in ${folder}.` }],
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `Marked ${count} messages as read in ${folder}.` }],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to mark all read: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to mark all read: ${sanitizeError(error)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+if (!READONLY)
+  server.registerTool(
+    "save_draft",
+    {
+      description:
+        "Save an email as a draft without sending it. The draft is placed in the Drafts folder for the user to review and send manually.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      inputSchema: {
+        to: z
+          .string()
+          .min(1, "Recipient is required")
+          .max(10_000)
+          .refine(validateAddresses, "Each 'to' address must be a valid email")
+          .describe("Recipient email address(es), comma-separated"),
+        subject: z
+          .string()
+          .min(1, "Subject is required")
+          .max(998, "Subject exceeds RFC 5322 line length limit")
+          .describe("Email subject line"),
+        body: z
+          .string()
+          .min(1, "Body is required")
+          .max(500_000, "Body too large")
+          .describe("Email body content (plain text or HTML)"),
+        isHtml: z.boolean().optional().default(false).describe("Whether the body contains HTML content"),
+        cc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each CC address must be a valid email")
+          .optional()
+          .describe("CC recipient(s), comma-separated"),
+        bcc: z
+          .string()
+          .max(10_000)
+          .refine(validateAddresses, "Each BCC address must be a valid email")
+          .optional()
+          .describe("BCC recipient(s), comma-separated"),
+        folder: z.string().optional().default("Drafts").describe("Folder to save the draft in (default: Drafts)"),
+      },
+    },
+    async ({ to, subject, body, isHtml, cc, bcc, folder }) => {
+      debugLog(`[Tool] Executing tool: save_draft (folder=${folder})`);
+
+      try {
+        const rawMessage = await emailService.buildRawMessage({
+          to,
+          subject,
+          body,
+          isHtml,
+          cc,
+          bcc,
+        });
+
+        const result = await imapService.saveDraft(folder, rawMessage);
+        const uidInfo = result.uid ? ` (UID: ${result.uid})` : "";
+        return {
+          content: [{ type: "text" as const, text: `Draft saved to ${folder}.${uidInfo}` }],
+        };
+      } catch (error) {
+        console.error(`[Error] Failed to save draft: ${error instanceof Error ? error.message : String(error)}`);
+        return {
+          content: [{ type: "text" as const, text: `Failed to save draft: ${sanitizeError(error)}` }],
           isError: true,
         };
       }

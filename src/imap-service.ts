@@ -1,5 +1,6 @@
 import { ImapFlow } from "imapflow";
 import type { FetchMessageObject, MessageAddressObject, MessageStructureObject, SearchObject } from "imapflow";
+import { convert } from "html-to-text";
 import { validateFolderPath, validatePartNumber } from "./validation.js";
 
 export interface ImapConfig {
@@ -88,26 +89,18 @@ function findPartNumber(structure: MessageStructureObject, targetType: string): 
 }
 
 /**
- * Strip HTML tags and decode common HTML entities to produce readable plain text.
+ * Convert HTML to readable plain text using html-to-text.
+ * Preserves links as `text [url]`, skips images/tracking pixels,
+ * and handles whitespace, entities, and list formatting.
  */
 function stripHtml(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<\/li>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "- ")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return convert(html, {
+    wordwrap: false,
+    selectors: [
+      { selector: "a", options: { hideLinkHrefIfSameAsText: true } },
+      { selector: "img", format: "skip" },
+    ],
+  });
 }
 
 /**
@@ -166,8 +159,33 @@ export class ImapService {
   }
 
   /**
-   * List recent messages from a folder.
+   * Fetch envelopes for a set of UIDs, sort by date descending, and return
+   * the top `limit` messages. When the candidate set exceeds MAX_ENVELOPE_FETCH
+   * we fall back to taking the highest UIDs as a heuristic.
    */
+  private async fetchSortAndLimit(client: ImapFlow, uids: number[], limit: number): Promise<MessageSummary[]> {
+    if (uids.length === 0) return [];
+
+    // For up to 500 UIDs, fetch all envelopes so date sort is exact.
+    // Beyond that, take the highest UIDs as an approximation.
+    const MAX_ENVELOPE_FETCH = 500;
+    const selectedUids = uids.length <= MAX_ENVELOPE_FETCH ? uids : uids.slice(-MAX_ENVELOPE_FETCH);
+    const fetchRange = selectedUids.join(",");
+
+    const messages: MessageSummary[] = [];
+    for await (const msg of client.fetch(fetchRange, { uid: true, envelope: true, flags: true }, { uid: true })) {
+      messages.push(this.toSummary(msg));
+    }
+
+    // Sort newest first by date, falling back to UID descending
+    messages.sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return da !== db ? db - da : b.uid - a.uid;
+    });
+    return messages.slice(0, limit);
+  }
+
   async listMessages(folder: string, limit: number, beforeUid?: number): Promise<MessageSummary[]> {
     validateFolderPath(folder);
     this.log(`[IMAP] Listing messages from ${folder}, limit ${limit}${beforeUid ? `, beforeUid ${beforeUid}` : ""}`);
@@ -176,52 +194,15 @@ export class ImapService {
       await client.connect();
       const lock = await client.getMailboxLock(folder);
       try {
-        const messages: MessageSummary[] = [];
-
+        let result: number[] | false;
         if (beforeUid) {
-          const uidRange = `1:${beforeUid - 1}`;
-          const result = await client.search({ uid: uidRange }, { uid: true });
-          if (!result || result.length === 0) return [];
-
-          const selectedUids = result.slice(-limit);
-          const fetchRange = selectedUids.join(",");
-          for await (const msg of client.fetch(
-            fetchRange,
-            {
-              uid: true,
-              envelope: true,
-              flags: true,
-            },
-            { uid: true },
-          )) {
-            messages.push(this.toSummary(msg));
-          }
+          result = await client.search({ uid: `1:${beforeUid - 1}` }, { uid: true });
         } else {
-          const result = await client.search({ all: true }, { uid: true });
-          if (!result || result.length === 0) return [];
-
-          const selectedUids = result.slice(-limit);
-          const fetchRange = selectedUids.join(",");
-          for await (const msg of client.fetch(
-            fetchRange,
-            {
-              uid: true,
-              envelope: true,
-              flags: true,
-            },
-            { uid: true },
-          )) {
-            messages.push(this.toSummary(msg));
-          }
+          result = await client.search({ all: true }, { uid: true });
         }
+        if (!result || result.length === 0) return [];
 
-        // Sort newest first by date, falling back to UID descending
-        messages.sort((a, b) => {
-          const da = a.date ? new Date(a.date).getTime() : 0;
-          const db = b.date ? new Date(b.date).getTime() : 0;
-          return da !== db ? db - da : b.uid - a.uid;
-        });
-        return messages;
+        return this.fetchSortAndLimit(client, result, limit);
       } finally {
         lock.release();
       }
@@ -382,30 +363,7 @@ export class ImapService {
         const result = await client.search(query, { uid: true });
         if (!result || result.length === 0) return [];
 
-        // Take the most recent UIDs up to the limit
-        const selectedUids = result.slice(-limit);
-        const uidRange = selectedUids.join(",");
-
-        const messages: MessageSummary[] = [];
-        for await (const msg of client.fetch(
-          uidRange,
-          {
-            uid: true,
-            envelope: true,
-            flags: true,
-          },
-          { uid: true },
-        )) {
-          messages.push(this.toSummary(msg));
-        }
-
-        // Sort newest first by date, falling back to UID descending
-        messages.sort((a, b) => {
-          const da = a.date ? new Date(a.date).getTime() : 0;
-          const db = b.date ? new Date(b.date).getTime() : 0;
-          return da !== db ? db - da : b.uid - a.uid;
-        });
-        return messages;
+        return this.fetchSortAndLimit(client, result, limit);
       } finally {
         lock.release();
       }
@@ -547,6 +505,163 @@ export class ImapService {
       } finally {
         lock.release();
       }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Mark all unread messages in a folder as read.
+   * Optionally limit to messages older than a given date.
+   * Returns the number of messages marked.
+   */
+  async markAllRead(folder: string, olderThan?: string): Promise<number> {
+    validateFolderPath(folder);
+    this.log(`[IMAP] Marking all unread as read in ${folder}${olderThan ? ` before ${olderThan}` : ""}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const query: SearchObject = { seen: false };
+        if (olderThan) query.before = olderThan;
+
+        const result = await client.search(query, { uid: true });
+        if (!result || result.length === 0) return 0;
+
+        const uidRange = result.join(",");
+        await client.messageFlagsAdd(uidRange, ["\\Seen"], { uid: true });
+        return result.length;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Find a message by its Message-ID header. Returns the UID if found.
+   */
+  async findByMessageId(folder: string, messageId: string): Promise<number | undefined> {
+    validateFolderPath(folder);
+    this.log(`[IMAP] Searching for Message-ID ${messageId} in ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const result = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
+        if (!result || result.length === 0) return undefined;
+        return result[result.length - 1]; // Return the last (most recent) match
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Get all messages in a conversation thread by walking References and In-Reply-To headers.
+   * Searches within a single folder.
+   */
+  async getThread(folder: string, uid: number, limit: number): Promise<MessageSummary[]> {
+    validateFolderPath(folder);
+    this.log(`[IMAP] Getting thread for UID ${uid} in ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await client.getMailboxLock(folder);
+      try {
+        // Step 1: fetch the seed message's messageId and headers
+        const seed = await client.fetchOne(
+          String(uid),
+          { uid: true, envelope: true, headers: ["references"] },
+          { uid: true },
+        );
+        if (!seed) throw new Error(`Message UID ${uid} not found in ${folder}`);
+
+        const seedMessageId = seed.envelope?.messageId || "";
+        if (!seedMessageId) throw new Error(`Message UID ${uid} has no Message-ID`);
+
+        // Parse References header from the raw headers buffer
+        const headersStr = seed.headers ? seed.headers.toString("utf-8") : "";
+        const referencesMatch = headersStr.match(/^References:\s*(.+(?:\r?\n[ \t]+.+)*)/im);
+        const referencesRaw = referencesMatch ? referencesMatch[1].replace(/\r?\n[ \t]+/g, " ") : "";
+        const inReplyTo = seed.envelope?.inReplyTo || "";
+        const knownIds = new Set<string>();
+        knownIds.add(seedMessageId);
+
+        // Extract message-IDs from References header (space or newline separated)
+        const refMatches = referencesRaw.match(/<[^>]+>/g);
+        if (refMatches) {
+          for (const ref of refMatches) knownIds.add(ref);
+        }
+        if (inReplyTo) knownIds.add(inReplyTo);
+
+        // Step 2: search for all messages that reference any known ID, or are referenced
+        const allUids = new Set<number>();
+        allUids.add(uid);
+
+        for (const msgId of knownIds) {
+          // Find messages with this Message-ID
+          const byId = await client.search({ header: { "Message-ID": msgId } }, { uid: true });
+          if (byId && byId.length > 0) {
+            for (const u of byId) allUids.add(u);
+          }
+          // Find messages that reference this Message-ID
+          const byRef = await client.search({ header: { References: msgId } }, { uid: true });
+          if (byRef && byRef.length > 0) {
+            for (const u of byRef) allUids.add(u);
+          }
+          // Also check In-Reply-To
+          const byReply = await client.search({ header: { "In-Reply-To": msgId } }, { uid: true });
+          if (byReply && byReply.length > 0) {
+            for (const u of byReply) allUids.add(u);
+          }
+
+          if (allUids.size >= limit) break;
+        }
+
+        // Step 3: fetch envelopes for all found UIDs
+        const uidList = [...allUids].slice(0, limit);
+        const fetchRange = uidList.join(",");
+        const messages: MessageSummary[] = [];
+        for await (const msg of client.fetch(fetchRange, { uid: true, envelope: true, flags: true }, { uid: true })) {
+          messages.push(this.toSummary(msg));
+        }
+
+        // Sort chronologically (oldest first for thread reading)
+        messages.sort((a, b) => {
+          const da = a.date ? new Date(a.date).getTime() : 0;
+          const db = b.date ? new Date(b.date).getTime() : 0;
+          return da !== db ? da - db : a.uid - b.uid;
+        });
+        return messages;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Save a raw RFC 5322 message to a folder (IMAP APPEND).
+   * Returns the UID of the appended message if the server supports UIDPLUS.
+   */
+  async saveDraft(folder: string, rawMessage: Buffer): Promise<{ uid?: number }> {
+    validateFolderPath(folder);
+    this.log(`[IMAP] Saving draft to ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const result = await client.append(folder, rawMessage, ["\\Draft", "\\Seen"]);
+      if (result === false) {
+        throw new Error(`Failed to save draft to ${folder}`);
+      }
+      return { uid: result.uid };
     } finally {
       await client.logout().catch(() => {});
     }

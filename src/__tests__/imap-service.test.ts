@@ -16,6 +16,7 @@ const mockMessageDelete = vi.fn().mockResolvedValue(true);
 const mockMessageFlagsAdd = vi.fn().mockResolvedValue(true);
 const mockMessageFlagsRemove = vi.fn().mockResolvedValue(true);
 const mockDownload = vi.fn();
+const mockAppend = vi.fn();
 
 vi.mock("imapflow", () => ({
   ImapFlow: vi.fn().mockImplementation(function () {
@@ -33,6 +34,7 @@ vi.mock("imapflow", () => ({
       messageFlagsAdd: mockMessageFlagsAdd,
       messageFlagsRemove: mockMessageFlagsRemove,
       download: mockDownload,
+      append: mockAppend,
     };
   }),
 }));
@@ -296,6 +298,351 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       const result = await service.listMessages("INBOX", 10, 5);
       expect(result).toEqual([]);
+    });
+
+    it("correctly selects newest-by-date even when old UIDs have newer dates (moved messages)", async () => {
+      // Scenario: UIDs 5,10 are old messages that were moved INTO the folder (so low UIDs).
+      // UIDs 115,116,117,118,119,120 are newer by UID but OLDER by date.
+      // With limit=5, the result must include UIDs 5 and 10 because they have the newest dates.
+      mockSearch.mockResolvedValueOnce([5, 10, 115, 116, 117, 118, 119, 120]);
+
+      const messages = [
+        // Low UIDs but RECENT dates (moved into folder)
+        {
+          uid: 5,
+          envelope: {
+            subject: "Moved msg 1",
+            from: [{ address: "a@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-15T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 10,
+          envelope: {
+            subject: "Moved msg 2",
+            from: [{ address: "b@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-14T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        // High UIDs but OLDER dates (original messages)
+        {
+          uid: 115,
+          envelope: {
+            subject: "Old msg 1",
+            from: [{ address: "c@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-01T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 116,
+          envelope: {
+            subject: "Old msg 2",
+            from: [{ address: "d@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-02T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 117,
+          envelope: {
+            subject: "Old msg 3",
+            from: [{ address: "e@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-03T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 118,
+          envelope: {
+            subject: "Old msg 4",
+            from: [{ address: "f@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-04T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 119,
+          envelope: {
+            subject: "Old msg 5",
+            from: [{ address: "g@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-05T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 120,
+          envelope: {
+            subject: "Old msg 6",
+            from: [{ address: "h@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-03-06T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 5);
+
+      // The two moved messages should appear first (newest by date)
+      expect(result).toHaveLength(5);
+      expect(result[0].uid).toBe(5); // Apr 15 — newest
+      expect(result[0].subject).toBe("Moved msg 1");
+      expect(result[1].uid).toBe(10); // Apr 14
+      expect(result[1].subject).toBe("Moved msg 2");
+      // Followed by the 3 most recent of the old messages
+      expect(result[2].uid).toBe(120); // Mar 6
+      expect(result[3].uid).toBe(119); // Mar 5
+      expect(result[4].uid).toBe(118); // Mar 4
+    });
+
+    it("fetches ALL UIDs when total <= 500 for exact date ordering", async () => {
+      // Even with limit=2, all UIDs should be fetched so the sort is exact
+      mockSearch.mockResolvedValueOnce([1, 2, 3, 4, 5]);
+
+      const messages = [
+        {
+          uid: 1,
+          envelope: {
+            subject: "Newest",
+            from: [{ address: "a@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-15T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 2,
+          envelope: {
+            subject: "Middle",
+            from: [{ address: "b@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-10T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 3,
+          envelope: {
+            subject: "Oldest",
+            from: [{ address: "c@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-05T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 4,
+          envelope: {
+            subject: "Second",
+            from: [{ address: "d@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-14T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 5,
+          envelope: {
+            subject: "Third",
+            from: [{ address: "e@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-09T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 2);
+
+      // All 5 UIDs should be fetched (not just 2 or 10)
+      expect(mockFetch).toHaveBeenCalledWith("1,2,3,4,5", expect.anything(), { uid: true });
+      // Top 2 by date
+      expect(result).toHaveLength(2);
+      expect(result[0].subject).toBe("Newest"); // Apr 15
+      expect(result[1].subject).toBe("Second"); // Apr 14
+    });
+  });
+
+  describe("searchMessages ordering", () => {
+    it("returns search results sorted by date, not UID order", async () => {
+      // Simulate the exact bug: search returns UIDs in ascending order,
+      // but dates don't correlate with UIDs
+      mockSearch.mockResolvedValueOnce([69, 70, 71, 72, 73, 112, 113, 114, 115, 121]);
+
+      const messages = [
+        {
+          uid: 121,
+          envelope: {
+            subject: "Most recent",
+            from: [{ address: "a@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-15T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 112,
+          envelope: {
+            subject: "2nd most recent",
+            from: [{ address: "b@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-14T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 113,
+          envelope: {
+            subject: "3rd",
+            from: [{ address: "c@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-13T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 114,
+          envelope: {
+            subject: "4th",
+            from: [{ address: "d@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-12T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 115,
+          envelope: {
+            subject: "5th",
+            from: [{ address: "e@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-04-11T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 69,
+          envelope: {
+            subject: "Old 1",
+            from: [{ address: "f@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-10T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 70,
+          envelope: {
+            subject: "Old 2",
+            from: [{ address: "g@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-11T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 71,
+          envelope: {
+            subject: "Old 3",
+            from: [{ address: "h@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-12T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 72,
+          envelope: {
+            subject: "Old 4",
+            from: [{ address: "i@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-13T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+        {
+          uid: 73,
+          envelope: {
+            subject: "Old 5",
+            from: [{ address: "j@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-14T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const result = await service.searchMessages("INBOX", { since: "2026-01-01" }, 5);
+
+      // Must return the 5 newest BY DATE, not by UID
+      expect(result).toHaveLength(5);
+      expect(result[0].subject).toBe("Most recent"); // UID 121, Apr 15
+      expect(result[1].subject).toBe("2nd most recent"); // UID 112, Apr 14
+      expect(result[2].subject).toBe("3rd"); // UID 113, Apr 13
+      expect(result[3].subject).toBe("4th"); // UID 114, Apr 12
+      expect(result[4].subject).toBe("5th"); // UID 115, Apr 11
+      // UIDs 69-73 (oldest by date) should NOT appear
+    });
+
+    it("fetches all matching UIDs for correct date ordering (not just last N)", async () => {
+      // All 10 UIDs should be fetched, not just the last 5
+      mockSearch.mockResolvedValueOnce([69, 70, 71, 72, 73, 112, 113, 114, 115, 121]);
+
+      const messages = [
+        {
+          uid: 69,
+          envelope: {
+            subject: "A",
+            from: [{ address: "a@x.com" }],
+            to: [{ address: "me@pm.me" }],
+            date: new Date("2026-01-01T10:00:00Z"),
+          },
+          flags: new Set(),
+        },
+      ];
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          for (const m of messages) yield m;
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      await service.searchMessages("INBOX", { from: "test" }, 5);
+
+      // Verify ALL 10 UIDs were fetched, not just the last 5
+      expect(mockFetch).toHaveBeenCalledWith("69,70,71,72,73,112,113,114,115,121", expect.anything(), { uid: true });
     });
   });
 
@@ -843,6 +1190,156 @@ describe("ImapService", () => {
       expect(result).toBe(true);
       expect(mockMessageFlagsAdd).toHaveBeenCalledWith("42", ["\\Flagged"], { uid: true });
       expect(mockMessageFlagsRemove).toHaveBeenCalledWith("42", ["\\Seen"], { uid: true });
+    });
+  });
+
+  describe("markAllRead", () => {
+    it("marks all unread messages as read and returns count", async () => {
+      mockSearch.mockResolvedValueOnce([10, 20, 30]);
+
+      const service = new ImapService(baseConfig);
+      const count = await service.markAllRead("INBOX");
+
+      expect(count).toBe(3);
+      expect(mockSearch).toHaveBeenCalledWith({ seen: false }, { uid: true });
+      expect(mockMessageFlagsAdd).toHaveBeenCalledWith("10,20,30", ["\\Seen"], { uid: true });
+    });
+
+    it("returns 0 when no unread messages", async () => {
+      mockSearch.mockResolvedValueOnce([]);
+
+      const service = new ImapService(baseConfig);
+      const count = await service.markAllRead("INBOX");
+
+      expect(count).toBe(0);
+      expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+    });
+
+    it("applies olderThan filter", async () => {
+      mockSearch.mockResolvedValueOnce([5]);
+
+      const service = new ImapService(baseConfig);
+      await service.markAllRead("INBOX", "2026-04-01");
+
+      expect(mockSearch).toHaveBeenCalledWith({ seen: false, before: "2026-04-01" }, { uid: true });
+    });
+  });
+
+  describe("findByMessageId", () => {
+    it("returns UID when message is found", async () => {
+      mockSearch.mockResolvedValueOnce([42]);
+
+      const service = new ImapService(baseConfig);
+      const uid = await service.findByMessageId("Sent", "<abc@example.com>");
+
+      expect(uid).toBe(42);
+      expect(mockSearch).toHaveBeenCalledWith({ header: { "Message-ID": "<abc@example.com>" } }, { uid: true });
+    });
+
+    it("returns undefined when not found", async () => {
+      mockSearch.mockResolvedValueOnce([]);
+
+      const service = new ImapService(baseConfig);
+      const uid = await service.findByMessageId("Sent", "<missing@example.com>");
+
+      expect(uid).toBeUndefined();
+    });
+  });
+
+  describe("getThread", () => {
+    it("finds thread messages by walking References headers", async () => {
+      // Seed message fetch
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 10,
+        envelope: {
+          messageId: "<msg10@example.com>",
+          inReplyTo: "<msg5@example.com>",
+          subject: "Re: Hello",
+          from: [{ address: "bob@example.com" }],
+          to: [{ address: "alice@example.com" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+        },
+        flags: new Set(),
+        headers: Buffer.from("References: <msg5@example.com>\r\n"),
+      });
+
+      // Search for Message-ID <msg10@example.com>
+      mockSearch.mockResolvedValueOnce([10]);
+      // Search for References containing <msg10@example.com>
+      mockSearch.mockResolvedValueOnce([]);
+      // Search for In-Reply-To <msg10@example.com>
+      mockSearch.mockResolvedValueOnce([]);
+      // Search for Message-ID <msg5@example.com>
+      mockSearch.mockResolvedValueOnce([5]);
+      // Search for References containing <msg5@example.com>
+      mockSearch.mockResolvedValueOnce([10]);
+      // Search for In-Reply-To <msg5@example.com>
+      mockSearch.mockResolvedValueOnce([10]);
+
+      // Fetch envelopes for UIDs 5, 10
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            uid: 5,
+            envelope: {
+              subject: "Hello",
+              from: [{ address: "alice@example.com" }],
+              to: [{ address: "bob@example.com" }],
+              date: new Date("2026-04-14T10:00:00Z"),
+            },
+            flags: new Set(["\\Seen"]),
+          };
+          yield {
+            uid: 10,
+            envelope: {
+              subject: "Re: Hello",
+              from: [{ address: "bob@example.com" }],
+              to: [{ address: "alice@example.com" }],
+              date: new Date("2026-04-15T12:00:00Z"),
+            },
+            flags: new Set(),
+          };
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const thread = await service.getThread("INBOX", 10, 25);
+
+      expect(thread).toHaveLength(2);
+      // Sorted chronologically (oldest first)
+      expect(thread[0].uid).toBe(5);
+      expect(thread[0].subject).toBe("Hello");
+      expect(thread[1].uid).toBe(10);
+      expect(thread[1].subject).toBe("Re: Hello");
+    });
+
+    it("throws when seed message not found", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.getThread("INBOX", 999, 25)).rejects.toThrow("not found");
+    });
+  });
+
+  describe("saveDraft", () => {
+    it("saves draft and returns UID", async () => {
+      mockAppend.mockResolvedValueOnce({ destination: "Drafts", uid: 42 });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.saveDraft("Drafts", Buffer.from("Subject: Test\r\n\r\nBody"));
+
+      expect(result).toEqual({ uid: 42 });
+      expect(mockAppend).toHaveBeenCalledWith("Drafts", Buffer.from("Subject: Test\r\n\r\nBody"), [
+        "\\Draft",
+        "\\Seen",
+      ]);
+    });
+
+    it("throws when append fails", async () => {
+      mockAppend.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.saveDraft("Drafts", Buffer.from("test"))).rejects.toThrow("Failed to save draft");
     });
   });
 });

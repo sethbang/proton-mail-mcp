@@ -78,7 +78,7 @@ Then use this MCP config instead:
 
 ### Sending
 
-All send tools return the Message-ID of the sent message in their response, which can be used to locate the message via IMAP search.
+All send tools return the Message-ID of the sent message in their response, which can be used to locate the message via IMAP search. `send_email` also attempts a best-effort lookup of the sent copy UID in the Sent folder.
 
 #### `send_email`
 
@@ -124,6 +124,20 @@ Forward a message to new recipients with threading headers.
 | `isHtml` | No | Whether `body` is HTML (default: `false`) |
 | `cc` | No | CC recipients, comma-separated |
 | `bcc` | No | BCC recipients, comma-separated |
+
+#### `save_draft`
+
+Save an email as a draft without sending it. The draft is placed in the Drafts folder for the user to review and send manually. Returns the draft UID when available.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `to` | Yes | Recipient address(es), comma-separated |
+| `subject` | Yes | Subject line |
+| `body` | Yes | Plain text or HTML content |
+| `isHtml` | No | Whether `body` is HTML (default: `false`) |
+| `cc` | No | CC recipient(s), comma-separated |
+| `bcc` | No | BCC recipient(s), comma-separated |
+| `folder` | No | Folder to save draft in (default: `Drafts`) |
 
 ### Reading
 
@@ -179,6 +193,16 @@ Search messages by various criteria.
 | `flagged` | No | Filter by flagged/starred status |
 | `limit` | No | Max results, 1-100 (default: `20`) |
 
+#### `get_thread`
+
+Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first). Searches within a single folder.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | UID of any message in the thread |
+| `folder` | No | Folder to search in (default: `INBOX`) |
+| `limit` | No | Max messages to return, 1-50 (default: `25`) |
+
 ### Organizing
 
 #### `move_message`
@@ -211,6 +235,15 @@ Add or remove flags on a message. Common flags: `\Seen` (read), `\Flagged` (star
 | `folder` | No | Folder containing the message (default: `INBOX`) |
 | `flagsToAdd` | No | Flags to add (e.g. `["\\Seen", "\\Flagged"]`) |
 | `flagsToRemove` | No | Flags to remove (e.g. `["\\Seen"]`) |
+
+#### `mark_all_read`
+
+Mark all unread messages in a folder as read. Optionally limit to messages older than a given date.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `folder` | No | Folder to mark as read (default: `INBOX`) |
+| `olderThan` | No | Only mark messages before this date as read (`YYYY-MM-DD`) |
 
 ## Configuration
 

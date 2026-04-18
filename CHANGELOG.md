@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-17
+
+### Added
+
+- **`get_thread` tool** — find all messages in a conversation by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first).
+- **`mark_all_read` tool** — bulk mark all unread messages in a folder as read, with optional `olderThan` date filter. Single IMAP connection + single STORE command.
+- **`save_draft` tool** — save an email as a draft without sending it. Uses IMAP APPEND to place a fully-formed message in the Drafts folder for user review.
+- `send_email` now attempts a best-effort lookup of the sent copy UID in the Sent folder and includes it in the response when found.
+
+### Changed
+
+- **HTML-to-text conversion** now uses the `html-to-text` package instead of naive regex stripping. Preserves links as `text [url]`, formats lists with bullets, skips tracking pixels, and handles entities correctly.
+
+### Fixed
+
+- **Search and list ordering is now correct by date.** Replaced the 5x UID heuristic with a shared `fetchSortAndLimit()` helper that fetches all matching envelopes (up to 500) before sorting by date. This fixes the reported bug where `search_messages` and `list_messages` could return old messages instead of the most recent ones when UIDs didn't correlate with dates (e.g. moved messages).
+
 ## [0.3.0] - 2025-04-15
 
 ### Added
@@ -50,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security hardening: input validation, credential sanitization in error messages, rate limiting (10 emails/min), attachment size limits.
 - Debug logging to stderr via `DEBUG=true`.
 
+[0.4.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/sethbang/proton-mail-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.1.0...v0.2.0

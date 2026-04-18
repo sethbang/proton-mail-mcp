@@ -22,8 +22,8 @@ MCP (Model Context Protocol) server for Proton Mail email. Exposes tools for sen
 Four source files:
 
 - `src/index.ts` — MCP server entry point. Reads SMTP and IMAP config from environment variables, registers all tool handlers via `McpServer.registerTool()` with Zod input schemas, starts stdio transport. SMTP verification on startup is non-fatal (warns and continues).
-- `src/email-service.ts` — `EmailService` class wrapping nodemailer. Handles transporter creation with timeouts, `sendEmail()` (returns `SMTPTransport.SentMessageInfo` with `messageId`), and `verifyConnection()`.
-- `src/imap-service.ts` — `ImapService` class wrapping imapflow. Provides `listFolders()`, `listMessages()`, `readMessage()`, `searchMessages()`, `moveMessage()` (returns `MoveResult` with new UID), `deleteMessage()`, `updateFlags()`, and `downloadAttachment()`. Each operation creates a fresh IMAP connection to avoid stale connection issues.
+- `src/email-service.ts` — `EmailService` class wrapping nodemailer. Handles transporter creation with timeouts, `sendEmail()` (returns `SMTPTransport.SentMessageInfo` with `messageId`), `buildRawMessage()` (for draft APPEND), and `verifyConnection()`.
+- `src/imap-service.ts` — `ImapService` class wrapping imapflow. Provides `listFolders()`, `listMessages()`, `readMessage()`, `searchMessages()`, `getThread()`, `moveMessage()` (returns `MoveResult` with new UID), `deleteMessage()`, `updateFlags()`, `markAllRead()`, `findByMessageId()`, `saveDraft()`, and `downloadAttachment()`. Uses `fetchSortAndLimit()` to guarantee date-based ordering. Each operation creates a fresh IMAP connection to avoid stale connection issues.
 - `src/validation.ts` — Input validation and sanitization utilities: folder path, MIME part number, email address, IMAP flag validation; filename and from-name sanitization; error message sanitization for MCP clients.
 
 Tests live in `src/__tests__/` and are excluded from the TypeScript build via `tsconfig.json`.
@@ -31,21 +31,24 @@ Tests live in `src/__tests__/` and are excluded from the TypeScript build via `t
 ## MCP Tools
 
 **SMTP (sending) — all return Message-ID in response:**
-- `send_email` — send email with to/subject/body, optional cc/bcc/replyTo/fromName/isHtml/attachments
+- `send_email` — send email, returns Message-ID + best-effort Sent folder UID
 - `reply_email` — reply with threading headers, quoted original (opt out via `includeQuote: false`)
 - `forward_email` — forward with original content and threading headers
+- `save_draft` — save email as draft via IMAP APPEND (does not send)
 
 **IMAP (reading, requires Proton Mail Bridge):**
 - `list_folders` — list mailbox folders with message/unread counts
-- `list_messages` — list recent messages from a folder (default: INBOX), UID-based pagination
+- `list_messages` — list recent messages sorted by date (newest first), UID-based pagination
 - `read_message` — read a specific message by UID, returns headers and body (truncation shows original length)
-- `search_messages` — search by from/to/subject/body/date/flags
+- `search_messages` — search by from/to/subject/body/date/flags, sorted by date (newest first)
+- `get_thread` — find all messages in a conversation thread via References/In-Reply-To headers
 - `download_attachment` — download attachment by MIME part number (base64)
 
 **Mailbox management — move/delete return new UID when UIDPLUS is supported:**
 - `move_message` — move message to a different folder
 - `delete_message` — soft-delete to Trash (default) or permanent expunge
 - `update_message_flags` — add/remove flags (\\Seen, \\Flagged, etc.)
+- `mark_all_read` — bulk mark all unread messages in a folder as read
 
 ## Required Environment Variables
 

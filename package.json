@@ -1,6 +1,6 @@
 {
   "name": "proton-mail-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server for Proton Mail — send, read, and search email over SMTP and IMAP",
   "repository": {
     "type": "git",
@@ -34,10 +34,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "html-to-text": "^9.0.5",
     "imapflow": "^1.3.1",
     "nodemailer": "^8.0.5"
   },
   "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
     "@types/node": "^25.6.0",
     "@types/nodemailer": "^8.0.0",
     "@typescript-eslint/eslint-plugin": "^8.58.2",
