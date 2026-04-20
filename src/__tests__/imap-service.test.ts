@@ -300,6 +300,46 @@ describe("ImapService", () => {
       expect(result).toEqual([]);
     });
 
+    it("throws 'Folder not found' when getMailboxLock reports mailboxMissing", async () => {
+      // imapflow sets err.mailboxMissing = true on SELECT-NO + LIST-empty (imap-flow.js:3580).
+      const err = Object.assign(new Error("SELECT failed"), { mailboxMissing: true });
+      mockGetMailboxLock.mockRejectedValueOnce(err);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.listMessages("NoSuchFolder", 10)).rejects.toThrow("Folder not found: NoSuchFolder");
+
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    });
+
+    it("throws 'Folder not found' when serverResponseCode is NONEXISTENT", async () => {
+      const err = Object.assign(new Error("SELECT failed"), { serverResponseCode: "NONEXISTENT" });
+      mockGetMailboxLock.mockRejectedValueOnce(err);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.listMessages("NoSuchFolder", 10)).rejects.toThrow("Folder not found: NoSuchFolder");
+
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    });
+
+    it("falls back to text matching when imapflow doesn't annotate the error", async () => {
+      // Defense in depth — if imapflow's error API ever drifts, our text fallback still catches it.
+      mockGetMailboxLock.mockRejectedValueOnce(new Error("No such mailbox NoSuchFolder"));
+
+      const service = new ImapService(baseConfig);
+      await expect(service.listMessages("NoSuchFolder", 10)).rejects.toThrow("Folder not found: NoSuchFolder");
+
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    });
+
+    it("passes through unrelated lock errors unchanged", async () => {
+      mockGetMailboxLock.mockRejectedValueOnce(new Error("network blew up"));
+
+      const service = new ImapService(baseConfig);
+      await expect(service.listMessages("INBOX", 10)).rejects.toThrow("network blew up");
+
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    });
+
     it("correctly selects newest-by-date even when old UIDs have newer dates (moved messages)", async () => {
       // Scenario: UIDs 5,10 are old messages that were moved INTO the folder (so low UIDs).
       // UIDs 115,116,117,118,119,120 are newer by UID but OLDER by date.
@@ -1037,6 +1077,301 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       await expect(service.readMessage("INBOX", 999)).rejects.toThrow("Message UID 999 not found in INBOX");
     });
+
+    it("populates extraHeaders when showHeaders=true", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 60,
+        envelope: {
+          subject: "With Headers",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<hdrs@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain" },
+        headers: Buffer.from(
+          [
+            "In-Reply-To: <prev@example.com>",
+            "References: <first@example.com>",
+            "Reply-To: reply@example.com",
+            "List-Unsubscribe: <mailto:unsub@example.com>",
+            "",
+            "",
+          ].join("\r\n"),
+        ),
+      });
+      mockDownloadPart("Body");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 60, { showHeaders: true });
+
+      expect(msg.extraHeaders).toBeDefined();
+      expect(msg.extraHeaders?.["in-reply-to"]).toBe("<prev@example.com>");
+      expect(msg.extraHeaders?.["references"]).toBe("<first@example.com>");
+      expect(msg.extraHeaders?.["reply-to"]).toBe("reply@example.com");
+      expect(msg.extraHeaders?.["list-unsubscribe"]).toBe("<mailto:unsub@example.com>");
+
+      // The fetch must have requested these headers
+      const fetchOptions = mockFetchOne.mock.calls[0][1];
+      expect(fetchOptions).toHaveProperty("headers");
+      const requested = (fetchOptions.headers as string[]).map((h: string) => h.toLowerCase());
+      expect(requested).toContain("in-reply-to");
+      expect(requested).toContain("references");
+      expect(requested).toContain("reply-to");
+      expect(requested).toContain("list-unsubscribe");
+    });
+
+    it("unfolds continuation lines in header values", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 61,
+        envelope: {
+          subject: "Folded",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<folded@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain" },
+        headers: Buffer.from(
+          [
+            "References: <a@example.com>",
+            "\t<b@example.com>",
+            " <c@example.com>",
+            "In-Reply-To: <a@example.com>",
+            "",
+            "",
+          ].join("\r\n"),
+        ),
+      });
+      mockDownloadPart("Body");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 61, { showHeaders: true });
+
+      expect(msg.extraHeaders?.["references"]).toContain("<a@example.com>");
+      expect(msg.extraHeaders?.["references"]).toContain("<b@example.com>");
+      expect(msg.extraHeaders?.["references"]).toContain("<c@example.com>");
+    });
+
+    it("does not request extra headers when showHeaders is not set", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 62,
+        envelope: {
+          subject: "Default",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+          messageId: "<default@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain" },
+      });
+      mockDownloadPart("Body");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 62);
+
+      expect(msg.extraHeaders).toBeUndefined();
+      const fetchOptions = mockFetchOne.mock.calls[0][1];
+      expect(fetchOptions.headers).toBeFalsy();
+    });
+
+    // Round 3: the round-2 findPartNumber walked by content-type only, so a text/plain
+    // *attachment* (disposition=attachment) sitting next to an HTML body was picked as
+    // the body — silently returning attachment content to the caller.
+    it("picks the HTML body, not a sibling text/plain attachment", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 70,
+        envelope: {
+          subject: "HTML + text attachment",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-19T12:00:00Z"),
+          messageId: "<htmlattach@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            {
+              type: "multipart/alternative",
+              childNodes: [
+                { type: "text/plain", part: "1.1" },
+                { type: "text/html", part: "1.2" },
+              ],
+            },
+            {
+              type: "text/plain",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "hello.txt" },
+              size: 31,
+            },
+          ],
+        },
+      });
+      // Expect the body to come from part 1.1 (text/plain inside multipart/alternative),
+      // NOT part 2 (the attachment).
+      mockDownloadPart("This is the actual body text.");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 70);
+
+      expect(msg.body).toBe("This is the actual body text.");
+      expect(mockDownload).toHaveBeenCalledWith("70", "1.1", { uid: true });
+      // Regression guard: the attachment still appears in attachments
+      expect(msg.attachments).toEqual([
+        { partNumber: "2", filename: "hello.txt", contentType: "text/plain", size: 31 },
+      ]);
+    });
+
+    it("strips HTML when the only body is HTML and a text/plain attachment sits alongside", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 71,
+        envelope: {
+          subject: "HTML-only + attachment",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-19T12:00:00Z"),
+          messageId: "<htmlonlyattach@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/html", part: "1" },
+            {
+              type: "text/plain",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "hello.txt" },
+              size: 31,
+            },
+          ],
+        },
+      });
+      mockDownloadPart("<html><body><p>Body HTML content</p></body></html>");
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 71);
+
+      // Should strip HTML from part 1, not read the text/plain attachment (part 2).
+      expect(msg.bodyFormat).toBe("html-stripped");
+      expect(msg.body).toContain("Body HTML content");
+      expect(mockDownload).toHaveBeenCalledWith("71", "1", { uid: true });
+    });
+
+    it("stripUrls=true drops anchor href when rendering HTML-only body", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 72,
+        envelope: {
+          subject: "Newsletter",
+          from: [{ address: "newsletter@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-19T12:00:00Z"),
+          messageId: "<news@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/html", part: "1" },
+      });
+      mockDownloadPart(
+        '<html><body><p>Check out <a href="https://tracker.example/c/verylongpath?id=abc123">our new thing</a>!</p></body></html>',
+      );
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 72, { stripUrls: true });
+
+      expect(msg.body).toContain("our new thing");
+      expect(msg.body).not.toContain("tracker.example");
+      expect(msg.body).not.toContain("https://");
+    });
+
+    it("stripUrls default preserves href in brackets (regression guard)", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 73,
+        envelope: {
+          subject: "Newsletter",
+          from: [{ address: "newsletter@example.com" }],
+          to: [{ address: "me@pm.me" }],
+          date: new Date("2026-04-19T12:00:00Z"),
+          messageId: "<news2@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/html", part: "1" },
+      });
+      mockDownloadPart(
+        '<html><body><p>Check out <a href="https://tracker.example/c/verylongpath">our new thing</a>!</p></body></html>',
+      );
+
+      const service = new ImapService(baseConfig);
+      const msg = await service.readMessage("INBOX", 73);
+
+      expect(msg.body).toContain("our new thing");
+      expect(msg.body).toContain("https://tracker.example/c/verylongpath");
+    });
+  });
+
+  describe("listAttachments", () => {
+    it("returns attachment metadata without downloading the body", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            {
+              type: "application/pdf",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "report.pdf" },
+              size: 12345,
+            },
+            {
+              type: "image/png",
+              part: "3",
+              disposition: "attachment",
+              dispositionParameters: { filename: "chart.png" },
+              size: 6789,
+            },
+          ],
+        },
+      });
+
+      const service = new ImapService(baseConfig);
+      const atts = await service.listAttachments("INBOX", 42);
+
+      expect(atts).toEqual([
+        { partNumber: "2", filename: "report.pdf", contentType: "application/pdf", size: 12345 },
+        { partNumber: "3", filename: "chart.png", contentType: "image/png", size: 6789 },
+      ]);
+      // Body must not be downloaded
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it("returns empty array when the message has no attachments", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: { type: "text/plain", part: "1" },
+      });
+
+      const service = new ImapService(baseConfig);
+      const atts = await service.listAttachments("INBOX", 42);
+      expect(atts).toEqual([]);
+    });
+
+    it("throws when UID does not exist", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.listAttachments("INBOX", 999999)).rejects.toThrow("Message UID 999999 not found in INBOX");
+    });
+
+    it("rejects folder path with control characters", async () => {
+      const service = new ImapService(baseConfig);
+      await expect(service.listAttachments("IN\r\nBOX", 1)).rejects.toThrow("invalid control characters");
+    });
   });
 
   describe("searchMessages", () => {
@@ -1093,7 +1428,29 @@ describe("ImapService", () => {
   });
 
   describe("downloadAttachment", () => {
+    // Helper to mock the pre-check fetch of bodyStructure so downloadAttachment
+    // can validate the partNumber before calling client.download.
+    function mockBodyStructure(parts: { part: string; filename?: string; type?: string }[]) {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "0" },
+            ...parts.map((p) => ({
+              type: p.type ?? "application/octet-stream",
+              part: p.part,
+              disposition: "attachment",
+              dispositionParameters: { filename: p.filename ?? `file-${p.part}` },
+              size: 1,
+            })),
+          ],
+        },
+      });
+    }
+
     it("downloads and returns base64-encoded content", async () => {
+      mockBodyStructure([{ part: "2", filename: "report.pdf", type: "application/pdf" }]);
       const fileContent = Buffer.from("PDF file contents here");
       mockDownload.mockResolvedValueOnce({
         meta: {
@@ -1115,6 +1472,7 @@ describe("ImapService", () => {
     });
 
     it("concatenates multiple stream chunks", async () => {
+      mockBodyStructure([{ part: "1", filename: "big.txt", type: "text/plain" }]);
       mockDownload.mockResolvedValueOnce({
         meta: { contentType: "text/plain", filename: "big.txt" },
         content: (async function* () {
@@ -1131,6 +1489,7 @@ describe("ImapService", () => {
     });
 
     it("handles missing metadata gracefully", async () => {
+      mockBodyStructure([{ part: "3" }]);
       mockDownload.mockResolvedValueOnce({
         meta: {},
         content: (async function* () {
@@ -1144,10 +1503,123 @@ describe("ImapService", () => {
       expect(result.filename).toBe("unnamed");
       expect(result.contentType).toBe("application/octet-stream");
     });
+
+    it("throws a clear error when the part number is not on the message", async () => {
+      // bodyStructure only has part 2; user asks for 42
+      mockBodyStructure([{ part: "2", filename: "real.pdf", type: "application/pdf" }]);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("INBOX", 42, "42")).rejects.toThrow(
+        /Part 42 not found on UID 42 in INBOX.*known parts.*2/,
+      );
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it("throws when UID does not exist", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("INBOX", 999999, "1")).rejects.toThrow(
+        "Message UID 999999 not found in INBOX",
+      );
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it("reports 'known parts: [(none)]' when the message has no attachments at all", async () => {
+      // Message is a plain body-only email with no attachments. Any partNumber lookup
+      // must surface the empty list so the caller knows there's nothing to download.
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: { type: "text/plain", part: "1" },
+      });
+
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("INBOX", 42, "1")).rejects.toThrow(
+        "Part 1 not found on UID 42 in INBOX; known parts: [(none)]",
+      );
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it("lists all attachment parts in the error when the requested part is missing", async () => {
+      mockBodyStructure([
+        { part: "2", filename: "a.pdf", type: "application/pdf" },
+        { part: "3", filename: "b.png", type: "image/png" },
+        { part: "4", filename: "c.txt", type: "text/plain" },
+      ]);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("INBOX", 42, "99")).rejects.toThrow(
+        "Part 99 not found on UID 42 in INBOX; known parts: [2, 3, 4]",
+      );
+    });
+  });
+
+  // Regression guard for round-3 "forward_email sets \Answered on source" — nothing in
+  // the forward path (readMessage → downloadAttachment → sendEmail) should ever touch flags.
+  // If \Answered appears on the source after a forward, it's Proton Bridge behavior, not us.
+  describe("flag-setting side-effects (regression guard)", () => {
+    it("readMessage never calls messageFlagsAdd / messageFlagsRemove", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        envelope: {
+          subject: "Test",
+          from: [{ address: "a@example.com" }],
+          to: [{ address: "b@example.com" }],
+          date: new Date("2026-04-20T12:00:00Z"),
+          messageId: "<test@example.com>",
+        },
+        flags: new Set(),
+        bodyStructure: { type: "text/plain", part: "1" },
+      });
+      mockDownload.mockResolvedValueOnce({
+        meta: {},
+        content: (async function* () {
+          yield Buffer.from("body");
+        })(),
+      });
+
+      const service = new ImapService(baseConfig);
+      await service.readMessage("INBOX", 42);
+
+      expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+      expect(mockMessageFlagsRemove).not.toHaveBeenCalled();
+    });
+
+    it("downloadAttachment never calls messageFlagsAdd / messageFlagsRemove", async () => {
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            {
+              type: "application/pdf",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "a.pdf" },
+              size: 10,
+            },
+          ],
+        },
+      });
+      mockDownload.mockResolvedValueOnce({
+        meta: { contentType: "application/pdf", filename: "a.pdf" },
+        content: (async function* () {
+          yield Buffer.from("pdf");
+        })(),
+      });
+
+      const service = new ImapService(baseConfig);
+      await service.downloadAttachment("INBOX", 42, "2");
+
+      expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+      expect(mockMessageFlagsRemove).not.toHaveBeenCalled();
+    });
   });
 
   describe("moveMessage", () => {
     it("moves message and returns MoveResult with new UID on success", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       mockMessageMove.mockResolvedValueOnce({ uidMap: new Map([[42, 100]]) });
 
       const service = new ImapService(baseConfig);
@@ -1160,6 +1632,7 @@ describe("ImapService", () => {
     });
 
     it("returns success without newUid when uidMap is empty", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       mockMessageMove.mockResolvedValueOnce({ uidMap: new Map() });
 
       const service = new ImapService(baseConfig);
@@ -1168,17 +1641,62 @@ describe("ImapService", () => {
       expect(result).toEqual({ success: true, newUid: undefined, destination: "Archive" });
     });
 
-    it("returns failure when server returns false", async () => {
+    // Superseded by the destination-probe tests below: when messageMove returns false
+    // we now probe the destination to distinguish "missing folder" from "other failure".
+
+    it("throws when source UID does not exist in the folder", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.moveMessage("INBOX", 999999, "Archive")).rejects.toThrow(
+        "Message UID 999999 not found in INBOX",
+      );
+      expect(mockMessageMove).not.toHaveBeenCalled();
+    });
+
+    // imapflow's messageMove swallows COPY failures internally (copy.js:42-46) and returns
+    // `false` — the underlying TRYCREATE/NONEXISTENT error never surfaces. So a try/catch
+    // around messageMove can never fire; we probe the destination with status() on failure.
+    it("probes destination with status() when messageMove returns false and translates missing folder", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       mockMessageMove.mockResolvedValueOnce(false);
+      const err = Object.assign(new Error("STATUS failed"), { mailboxMissing: true });
+      mockStatus.mockRejectedValueOnce(err);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.moveMessage("INBOX", 42, "NonexistentFolder")).rejects.toThrow(
+        "Destination folder not found: NonexistentFolder",
+      );
+      expect(mockStatus).toHaveBeenCalledWith("NonexistentFolder", { messages: true });
+    });
+
+    it("keeps the generic failure when destination exists but move still fails", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
+      mockMessageMove.mockResolvedValueOnce(false);
+      mockStatus.mockResolvedValueOnce({ messages: 5 }); // probe succeeds — folder exists
 
       const service = new ImapService(baseConfig);
       const result = await service.moveMessage("INBOX", 42, "Archive");
       expect(result).toEqual({ success: false, destination: "Archive" });
     });
+
+    it("translates source-folder-missing via mailboxMissing signal", async () => {
+      const err = Object.assign(new Error("SELECT failed"), { mailboxMissing: true });
+      mockGetMailboxLock.mockRejectedValueOnce(err);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.moveMessage("NoSuchFolder", 42, "Archive")).rejects.toThrow(
+        "Folder not found: NoSuchFolder",
+      );
+
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    });
   });
 
   describe("deleteMessage", () => {
     it("deletes message and returns true on success", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
+
       const service = new ImapService(baseConfig);
       const result = await service.deleteMessage("INBOX", 42);
 
@@ -1189,11 +1707,20 @@ describe("ImapService", () => {
     });
 
     it("returns false when server returns false", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       mockMessageDelete.mockResolvedValueOnce(false);
 
       const service = new ImapService(baseConfig);
       const result = await service.deleteMessage("INBOX", 42);
       expect(result).toBe(false);
+    });
+
+    it("throws when UID does not exist and does not call messageDelete", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.deleteMessage("INBOX", 999999)).rejects.toThrow("Message UID 999999 not found in INBOX");
+      expect(mockMessageDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -1232,6 +1759,24 @@ describe("ImapService", () => {
 
   describe("attachment size limit", () => {
     it("aborts download when attachment exceeds max size", async () => {
+      // Pre-check: part 2 must exist on the bodyStructure.
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 42,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "1" },
+            {
+              type: "application/octet-stream",
+              part: "2",
+              disposition: "attachment",
+              dispositionParameters: { filename: "huge.bin" },
+              size: 30 * 1024 * 1024,
+            },
+          ],
+        },
+      });
+
       const destroyFn = vi.fn();
       const largeChunk = Buffer.alloc(1024 * 1024); // 1MB chunks
       mockDownload.mockResolvedValueOnce({
@@ -1251,6 +1796,7 @@ describe("ImapService", () => {
 
   describe("updateFlags", () => {
     it("adds flags when flagsToAdd is non-empty", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       const service = new ImapService(baseConfig);
       await service.updateFlags("INBOX", 42, ["\\Seen", "\\Flagged"], []);
 
@@ -1259,6 +1805,7 @@ describe("ImapService", () => {
     });
 
     it("removes flags when flagsToRemove is non-empty", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       const service = new ImapService(baseConfig);
       await service.updateFlags("INBOX", 42, [], ["\\Seen"]);
 
@@ -1267,12 +1814,24 @@ describe("ImapService", () => {
     });
 
     it("adds and removes flags in one call", async () => {
+      mockFetchOne.mockResolvedValueOnce({ uid: 42 });
       const service = new ImapService(baseConfig);
       const result = await service.updateFlags("INBOX", 42, ["\\Flagged"], ["\\Seen"]);
 
       expect(result).toBe(true);
       expect(mockMessageFlagsAdd).toHaveBeenCalledWith("42", ["\\Flagged"], { uid: true });
       expect(mockMessageFlagsRemove).toHaveBeenCalledWith("42", ["\\Seen"], { uid: true });
+    });
+
+    it("throws when UID does not exist and does not call STORE", async () => {
+      mockFetchOne.mockResolvedValueOnce(false);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.updateFlags("INBOX", 999999, ["\\Seen"], [])).rejects.toThrow(
+        "Message UID 999999 not found in INBOX",
+      );
+      expect(mockMessageFlagsAdd).not.toHaveBeenCalled();
+      expect(mockMessageFlagsRemove).not.toHaveBeenCalled();
     });
   });
 
@@ -1402,6 +1961,122 @@ describe("ImapService", () => {
       const service = new ImapService(baseConfig);
       await expect(service.getThread("INBOX", 999, 25)).rejects.toThrow("not found");
     });
+
+    it("resolves seed by messageId across default folders when messageId is supplied", async () => {
+      // When messageId is supplied, the service should search for it across the default folder
+      // set (INBOX, Sent, All Mail) instead of trusting a (uid, folder) pair.
+      //
+      // Search call sequence (in order):
+      //  1. findByMessageId in INBOX → empty
+      //  2. findByMessageId in Sent → returns [7]
+      //  (no need to check All Mail once we've located the seed)
+      //  Then seed fetchOne in the locating folder (Sent),
+      //  then the reference walk across folders.
+      mockSearch
+        .mockResolvedValueOnce([]) // INBOX: no match
+        .mockResolvedValueOnce([7]) // Sent: match
+        // Reference walk: Message-ID in INBOX, Sent, All Mail; then References; then In-Reply-To
+        .mockResolvedValue([]);
+
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 7,
+        envelope: {
+          messageId: "<seed@example.com>",
+          inReplyTo: "",
+          subject: "Re: hi",
+          from: [{ address: "me@pm.me" }],
+          to: [{ address: "you@example.com" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+        },
+        flags: new Set(),
+        headers: Buffer.from(""),
+      });
+
+      mockFetch.mockReturnValue(
+        (async function* () {
+          yield {
+            uid: 7,
+            envelope: {
+              subject: "Re: hi",
+              from: [{ address: "me@pm.me" }],
+              to: [{ address: "you@example.com" }],
+              date: new Date("2026-04-15T12:00:00Z"),
+            },
+            flags: new Set(),
+          };
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      const thread = await service.getThreadByMessageId("<seed@example.com>", 25);
+
+      expect(thread.length).toBeGreaterThan(0);
+      expect(thread[0].uid).toBe(7);
+      // Should have locked INBOX and Sent at minimum while searching
+      const lockedFolders = mockGetMailboxLock.mock.calls.map((c) => c[0]);
+      expect(lockedFolders).toContain("INBOX");
+      expect(lockedFolders).toContain("Sent");
+    });
+
+    it("throws when messageId is not found in any default folder", async () => {
+      // All default folders return empty for the Message-ID search
+      mockSearch.mockResolvedValue([]);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.getThreadByMessageId("<missing@example.com>", 25)).rejects.toThrow("not found");
+    });
+
+    it("skips folders that don't exist while walking default set", async () => {
+      // All Mail doesn't exist on every provider — a NONEXISTENT there must not kill
+      // the whole thread lookup. Simulate by having getMailboxLock reject for "All Mail".
+      const originalLock = mockGetMailboxLock.getMockImplementation();
+      mockGetMailboxLock.mockImplementation((folder: string) => {
+        if (folder === "All Mail") {
+          const err = Object.assign(new Error("SELECT failed"), { mailboxMissing: true });
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ release: vi.fn() });
+      });
+
+      mockSearch.mockResolvedValueOnce([]).mockResolvedValueOnce([3]).mockResolvedValue([]);
+
+      mockFetchOne.mockResolvedValueOnce({
+        uid: 3,
+        envelope: {
+          messageId: "<seed2@example.com>",
+          inReplyTo: "",
+          subject: "hi",
+          from: [{ address: "me@pm.me" }],
+          to: [{ address: "you@example.com" }],
+          date: new Date("2026-04-15T12:00:00Z"),
+        },
+        flags: new Set(),
+        headers: Buffer.from(""),
+      });
+
+      mockFetch.mockReturnValue(
+        (async function* () {
+          yield {
+            uid: 3,
+            envelope: {
+              subject: "hi",
+              from: [{ address: "me@pm.me" }],
+              to: [{ address: "you@example.com" }],
+              date: new Date("2026-04-15T12:00:00Z"),
+            },
+            flags: new Set(),
+          };
+        })(),
+      );
+
+      const service = new ImapService(baseConfig);
+      // Should not throw despite All Mail being missing
+      const thread = await service.getThreadByMessageId("<seed2@example.com>", 25);
+      expect(thread.length).toBeGreaterThan(0);
+
+      // Restore implementation
+      mockGetMailboxLock.mockImplementation(originalLock ?? (() => Promise.resolve({ release: vi.fn() })));
+    });
   });
 
   describe("saveDraft", () => {
@@ -1423,6 +2098,100 @@ describe("ImapService", () => {
 
       const service = new ImapService(baseConfig);
       await expect(service.saveDraft("Drafts", Buffer.from("test"))).rejects.toThrow("Failed to save draft");
+    });
+
+    it("translates mailboxMissing on append to 'Folder not found'", async () => {
+      const err = Object.assign(new Error("APPEND failed"), { mailboxMissing: true });
+      mockAppend.mockRejectedValueOnce(err);
+
+      const service = new ImapService(baseConfig);
+      await expect(service.saveDraft("NoSuchDrafts", Buffer.from("test"))).rejects.toThrow(
+        "Folder not found: NoSuchDrafts",
+      );
+    });
+  });
+
+  // Every folder-taking service method must translate imapflow's mailboxMissing / NONEXISTENT /
+  // TRYCREATE signals into a uniform "Folder not found: <path>" error. Round-1 fixed listMessages
+  // via text matching (which didn't actually catch the real imapflow errors); round-2 routes
+  // every call through a shared lockFolder() helper and this block pins that contract.
+  describe("folder-not-found translation for all folder-taking tools", () => {
+    function rejectMailboxMissingOnce() {
+      const err = Object.assign(new Error("SELECT failed"), { mailboxMissing: true });
+      mockGetMailboxLock.mockRejectedValueOnce(err);
+    }
+
+    function resetLockDefault() {
+      mockGetMailboxLock.mockResolvedValue({ release: vi.fn() });
+    }
+
+    it("searchMessages", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.searchMessages("NoSuchFolder", { from: "a" }, 10)).rejects.toThrow(
+        "Folder not found: NoSuchFolder",
+      );
+      resetLockDefault();
+    });
+
+    it("readMessage", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.readMessage("NoSuchFolder", 1)).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
+    });
+
+    it("downloadAttachment", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.downloadAttachment("NoSuchFolder", 1, "1")).rejects.toThrow(
+        "Folder not found: NoSuchFolder",
+      );
+      resetLockDefault();
+    });
+
+    it("deleteMessage", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.deleteMessage("NoSuchFolder", 1)).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
+    });
+
+    it("updateFlags", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.updateFlags("NoSuchFolder", 1, ["\\Seen"], [])).rejects.toThrow(
+        "Folder not found: NoSuchFolder",
+      );
+      resetLockDefault();
+    });
+
+    it("markAllRead", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.markAllRead("NoSuchFolder")).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
+    });
+
+    it("getThread (uid path)", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.getThread("NoSuchFolder", 1, 25)).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
+    });
+
+    it("findByMessageId", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.findByMessageId("NoSuchFolder", "<a@b>")).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
+    });
+
+    it("listAttachments", async () => {
+      rejectMailboxMissingOnce();
+      const service = new ImapService(baseConfig);
+      await expect(service.listAttachments("NoSuchFolder", 1)).rejects.toThrow("Folder not found: NoSuchFolder");
+      resetLockDefault();
     });
   });
 });

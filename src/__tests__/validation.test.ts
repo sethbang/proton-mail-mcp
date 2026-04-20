@@ -7,6 +7,7 @@ import {
   isValidEmailAddress,
   validateImapFlag,
   sanitizeErrorMessage,
+  isValidDateString,
 } from "../validation.js";
 
 describe("validateFolderPath", () => {
@@ -160,6 +161,63 @@ describe("validateImapFlag", () => {
     expect(() => validateImapFlag("flag\r\n")).toThrow("Invalid IMAP flag");
     expect(() => validateImapFlag("flag;injection")).toThrow("Invalid IMAP flag");
   });
+
+  it("rejects backslash-prefixed flags that aren't RFC 3501 system flags", () => {
+    // IMAP servers silently drop unknown system flags. Catch these at the client boundary
+    // rather than letting the agent believe "flag added" when nothing happened.
+    expect(() => validateImapFlag("\\Bogus")).toThrow("Invalid IMAP flag");
+    expect(() => validateImapFlag("\\NotReal")).toThrow("Invalid IMAP flag");
+    expect(() => validateImapFlag("\\Xyz")).toThrow("Invalid IMAP flag");
+  });
+
+  it("error message for unknown system flag lists the allowed set", () => {
+    try {
+      validateImapFlag("\\Bogus");
+      throw new Error("should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toContain("\\Seen");
+      expect(msg).toContain("\\Flagged");
+      expect(msg).toContain("\\Answered");
+      expect(msg).toContain("\\Draft");
+      expect(msg).toContain("\\Deleted");
+    }
+  });
+
+  it("accepts \\Recent as a system flag", () => {
+    expect(validateImapFlag("\\Recent")).toBe("\\Recent");
+  });
+});
+
+describe("isValidDateString", () => {
+  it("accepts valid YYYY-MM-DD dates", () => {
+    expect(isValidDateString("2026-04-19")).toBe(true);
+    expect(isValidDateString("2020-01-01")).toBe(true);
+    expect(isValidDateString("1999-12-31")).toBe(true);
+    expect(isValidDateString("2000-02-29")).toBe(true); // leap year
+  });
+
+  it("rejects wrong format", () => {
+    expect(isValidDateString("04-19-2026")).toBe(false);
+    expect(isValidDateString("2026/04/19")).toBe(false);
+    expect(isValidDateString("2026.04.19")).toBe(false);
+    expect(isValidDateString("19-04-2026")).toBe(false);
+  });
+
+  it("rejects invalid calendar dates", () => {
+    expect(isValidDateString("2026-13-01")).toBe(false); // month 13
+    expect(isValidDateString("2026-00-01")).toBe(false); // month 0
+    expect(isValidDateString("2026-04-32")).toBe(false); // day 32
+    expect(isValidDateString("2026-04-00")).toBe(false); // day 0
+    expect(isValidDateString("2025-02-29")).toBe(false); // not a leap year
+  });
+
+  it("rejects empty and non-date strings", () => {
+    expect(isValidDateString("")).toBe(false);
+    expect(isValidDateString("today")).toBe(false);
+    expect(isValidDateString("yesterday")).toBe(false);
+    expect(isValidDateString("2026-04")).toBe(false);
+  });
 });
 
 describe("sanitizeErrorMessage", () => {
@@ -189,6 +247,16 @@ describe("sanitizeErrorMessage", () => {
   it("passes through 'not found' errors", () => {
     const err = new Error("Message UID 42 not found in INBOX");
     expect(sanitizeErrorMessage(err)).toBe("Error: Message UID 42 not found in INBOX");
+  });
+
+  it("passes through folder-not-found errors verbatim", () => {
+    // Regression guard: translated IMAP errors like "Folder not found: X" must reach the user
+    // in full so they can act on them rather than being generic-categorized.
+    const folder = new Error("Folder not found: NonexistentFolder");
+    expect(sanitizeErrorMessage(folder)).toBe("Error: Folder not found: NonexistentFolder");
+
+    const dest = new Error("Destination folder not found: NonexistentFolder");
+    expect(sanitizeErrorMessage(dest)).toBe("Error: Destination folder not found: NonexistentFolder");
   });
 
   it("redacts credentials in fallback messages", () => {

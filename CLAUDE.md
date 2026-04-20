@@ -23,32 +23,33 @@ Four source files:
 
 - `src/index.ts` — MCP server entry point. Reads SMTP and IMAP config from environment variables, registers all tool handlers via `McpServer.registerTool()` with Zod input schemas, starts stdio transport. SMTP verification on startup is non-fatal (warns and continues).
 - `src/email-service.ts` — `EmailService` class wrapping nodemailer. Handles transporter creation with timeouts, `sendEmail()` (returns `SMTPTransport.SentMessageInfo` with `messageId`), `buildRawMessage()` (for draft APPEND), and `verifyConnection()`.
-- `src/imap-service.ts` — `ImapService` class wrapping imapflow. Provides `listFolders()`, `listMessages()`, `readMessage()`, `searchMessages()`, `getThread()`, `moveMessage()` (returns `MoveResult` with new UID), `deleteMessage()`, `updateFlags()`, `markAllRead()`, `findByMessageId()`, `saveDraft()`, and `downloadAttachment()`. Uses `fetchSortAndLimit()` to guarantee date-based ordering. Each operation creates a fresh IMAP connection to avoid stale connection issues.
-- `src/validation.ts` — Input validation and sanitization utilities: folder path, MIME part number, email address, IMAP flag validation; filename and from-name sanitization; error message sanitization for MCP clients.
+- `src/imap-service.ts` — `ImapService` class wrapping imapflow. Provides `listFolders()`, `listMessages()`, `readMessage()` (supports `showHeaders` and `stripUrls` options), `searchMessages()`, `getThread()`, `getThreadByMessageId()` (cross-folder walk via INBOX/Sent/All Mail by default), `moveMessage()` (returns `MoveResult` with new UID; probes destination with `status()` on failure to translate missing-folder errors), `deleteMessage()`, `updateFlags()`, `markAllRead()`, `findByMessageId()`, `saveDraft()`, `downloadAttachment()` (pre-checks UID + partNumber against bodyStructure), and `listAttachments()`. Mutating operations pre-check UID existence via `fetchOne` so bogus UIDs throw instead of silently succeeding. All folder-taking operations route through a shared `lockFolder()` helper that translates imapflow's `mailboxMissing` / `serverResponseCode` signals into `"Folder not found: <path>"`. Uses `fetchSortAndLimit()` to guarantee date-based ordering. Each operation creates a fresh IMAP connection to avoid stale connection issues.
+- `src/validation.ts` — Input validation and sanitization utilities: folder path, MIME part number, email address, IMAP flag validation (RFC 3501 system-flag whitelist + alphanumeric user keywords), `isValidDateString` (strict YYYY-MM-DD with calendar-date validation); filename and from-name sanitization; error message sanitization for MCP clients (passes `"not found"` errors through verbatim).
 
 Tests live in `src/__tests__/` and are excluded from the TypeScript build via `tsconfig.json`.
 
 ## MCP Tools
 
 **SMTP (sending) — all return Message-ID in response:**
-- `send_email` — send email, returns Message-ID + best-effort Sent folder UID
+- `send_email` — send email, returns Message-ID + best-effort Sent folder UID; BCC recipients are masked as a count in the response
 - `reply_email` — reply with threading headers, quoted original (opt out via `includeQuote: false`)
-- `forward_email` — forward with original content and threading headers
-- `save_draft` — save email as draft via IMAP APPEND (does not send)
+- `forward_email` — forward with original content, threading headers, and original attachments (opt out via `includeAttachments: false`)
+- `save_draft` — save email as draft via IMAP APPEND (does not send); supports `fromName` and `replyTo` for parity with `send_email`
 
 **IMAP (reading, requires Proton Mail Bridge):**
 - `list_folders` — list mailbox folders with message/unread counts
-- `list_messages` — list recent messages sorted by date (newest first), UID-based pagination
-- `read_message` — read a specific message by UID, returns headers and body (truncation shows original length)
-- `search_messages` — search by from/to/subject/body/date/flags, sorted by date (newest first)
-- `get_thread` — find all messages in a conversation thread via References/In-Reply-To headers
-- `download_attachment` — download attachment by MIME part number (base64)
+- `list_messages` — list recent messages sorted by date (newest first), UID-based pagination; appends a `beforeUid` hint when more pages likely exist
+- `read_message` — read a specific message by UID, returns headers and body. Options: `preferHtml`, `maxBodyLength`, `showHeaders` (surface `In-Reply-To`/`References`/`Reply-To`/`List-Unsubscribe`/`List-ID`), `stripUrls` (drop anchor URLs from stripped HTML for newsletter summarization). Body-part selection skips `Content-Disposition: attachment` parts.
+- `search_messages` — search by from/to/subject/body/date/flags, sorted by date (newest first). Date filters are validated against YYYY-MM-DD; `since` is inclusive, `before` is exclusive.
+- `get_thread` — find all messages in a conversation thread via References/In-Reply-To headers. Prefer `messageId` input — walks INBOX + Sent + All Mail by default so cross-folder threads are returned intact. Output rows are tagged `UID X @FolderName`.
+- `list_attachments` — fetch attachment metadata (part numbers, filenames, types, sizes) without downloading the body
+- `download_attachment` — download attachment by MIME part number (base64). Pre-checks the partNumber against bodyStructure and throws `"Part X not found on UID Y in <folder>; known parts: [...]"` on a miss.
 
 **Mailbox management — move/delete return new UID when UIDPLUS is supported:**
-- `move_message` — move message to a different folder
+- `move_message` — move message to a different folder. Missing-destination errors translate to `"Destination folder not found: <dest>"`.
 - `delete_message` — soft-delete to Trash (default) or permanent expunge
-- `update_message_flags` — add/remove flags (\\Seen, \\Flagged, etc.)
-- `mark_all_read` — bulk mark all unread messages in a folder as read
+- `update_message_flags` — add/remove flags. Accepts RFC 3501 system flags (`\Seen`, `\Flagged`, `\Answered`, `\Draft`, `\Deleted`, `\Recent`) plus alphanumeric user keywords. Unknown `\`-prefixed names are rejected (IMAP would silently drop them).
+- `mark_all_read` — bulk mark all unread messages in a folder as read. `olderThan` is exclusive.
 
 ## Required Environment Variables
 

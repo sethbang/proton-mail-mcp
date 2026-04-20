@@ -69,19 +69,40 @@ export function isValidEmailAddress(addr: string): boolean {
 }
 
 /**
- * Validate an IMAP flag string. Accepts system flags (e.g. \Seen, \Flagged)
- * and custom keywords (alphanumeric + underscore). Throws on invalid.
+ * RFC 3501 system flags. IMAP servers silently drop unknown `\`-prefixed flags
+ * on STORE, so we whitelist the known set rather than accepting any `\Word`.
+ */
+const SYSTEM_FLAGS = new Set(["\\Seen", "\\Flagged", "\\Answered", "\\Draft", "\\Deleted", "\\Recent"]);
+
+/**
+ * Validate an IMAP flag string. Accepts RFC 3501 system flags only
+ * (not arbitrary `\Word`), plus custom keywords (alphanumeric + underscore).
  */
 export function validateImapFlag(flag: string): string {
-  // System flags: backslash followed by letters
-  if (/^\\[A-Za-z]+$/.test(flag)) {
+  if (SYSTEM_FLAGS.has(flag)) {
     return flag;
+  }
+  // Reject any other backslash-prefixed value — IMAP would silently drop it.
+  if (flag.startsWith("\\")) {
+    throw new Error(`Invalid IMAP flag: ${flag}. System flags must be one of ${[...SYSTEM_FLAGS].join(", ")}`);
   }
   // Custom keywords: alphanumeric + underscore
   if (/^[A-Za-z0-9_]+$/.test(flag)) {
     return flag;
   }
-  throw new Error(`Invalid IMAP flag: ${flag}`);
+  throw new Error(`Invalid IMAP flag: ${flag}. System flags must be one of ${[...SYSTEM_FLAGS].join(", ")}`);
+}
+
+/**
+ * Check whether a string is a valid YYYY-MM-DD calendar date.
+ * Used by Zod refinements on IMAP date filters.
+ */
+export function isValidDateString(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return false;
+  // Reject dates that JS silently rolled over (e.g. 2026-13-01 → 2027-01-01)
+  return s === d.toISOString().slice(0, 10);
 }
 
 /**

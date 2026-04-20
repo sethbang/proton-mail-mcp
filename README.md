@@ -92,7 +92,7 @@ Send an email using Proton Mail SMTP.
 | `isHtml` | No | Whether `body` is HTML (default: `false`) |
 | `cc` | No | CC recipient(s), comma-separated |
 | `bcc` | No | BCC recipient(s), comma-separated |
-| `replyTo` | No | Reply-To address |
+| `replyTo` | No | Reply-To address (Proton SMTP may rewrite unauthenticated values) |
 | `fromName` | No | Display name for the From field |
 | `attachments` | No | Array of `{filename, content, contentType}` (base64-encoded content) |
 
@@ -113,7 +113,7 @@ Reply to a message with proper threading headers (In-Reply-To, References). Incl
 
 #### `forward_email`
 
-Forward a message to new recipients with threading headers.
+Forward a message to new recipients with threading headers. Original attachments are carried forward by default.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -124,6 +124,7 @@ Forward a message to new recipients with threading headers.
 | `isHtml` | No | Whether `body` is HTML (default: `false`) |
 | `cc` | No | CC recipients, comma-separated |
 | `bcc` | No | BCC recipients, comma-separated |
+| `includeAttachments` | No | Include original attachments in the forward (default: `true`) |
 
 #### `save_draft`
 
@@ -137,6 +138,8 @@ Save an email as a draft without sending it. The draft is placed in the Drafts f
 | `isHtml` | No | Whether `body` is HTML (default: `false`) |
 | `cc` | No | CC recipient(s), comma-separated |
 | `bcc` | No | BCC recipient(s), comma-separated |
+| `replyTo` | No | Reply-To address (Proton SMTP may rewrite unauthenticated values) |
+| `fromName` | No | Display name for the From field |
 | `folder` | No | Folder to save draft in (default: `Drafts`) |
 
 ### Reading
@@ -157,7 +160,7 @@ List recent messages from a folder. Supports UID-based pagination.
 
 #### `read_message`
 
-Read a specific message by UID. Returns full headers, body, and attachment metadata. Prefers plain text; strips HTML tags from HTML-only messages.
+Read a specific message by UID. Returns full headers, body, and attachment metadata. Prefers plain text; strips HTML tags from HTML-only messages. Body-part selection skips parts marked `Content-Disposition: attachment`, so a `text/plain` attachment sitting next to an HTML body is never returned as the body.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -165,20 +168,31 @@ Read a specific message by UID. Returns full headers, body, and attachment metad
 | `folder` | No | Folder path (default: `INBOX`) |
 | `preferHtml` | No | Return raw HTML instead of stripped text (default: `false`) |
 | `maxBodyLength` | No | Max body length before truncation, 100-500000 (default: `50000`) |
+| `showHeaders` | No | Include `In-Reply-To`, `References`, `Reply-To`, `List-Unsubscribe`, `List-ID` in an Extra Headers section (default: `false`) |
+| `stripUrls` | No | Drop anchor URLs from stripped-HTML output, keeping only link text. Useful for summarizing newsletters (default: `false`) |
 
-#### `download_attachment`
+#### `list_attachments`
 
-Download an attachment by MIME part number. Use `read_message` first to see available attachments. Returns base64-encoded content.
+List attachment metadata (part numbers, filenames, types, sizes) for a message without downloading the body. Composes with `download_attachment` for bulk extraction.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `uid` | Yes | Message UID |
-| `partNumber` | Yes | MIME part number (from `read_message` output) |
+| `folder` | No | Folder containing the message (default: `INBOX`) |
+
+#### `download_attachment`
+
+Download an attachment by MIME part number. Use `list_attachments` or `read_message` first to see available parts. Returns base64-encoded content. Bad part numbers produce an actionable error listing known parts.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `uid` | Yes | Message UID |
+| `partNumber` | Yes | MIME part number (from `read_message` / `list_attachments`) |
 | `folder` | No | Folder containing the message (default: `INBOX`) |
 
 #### `search_messages`
 
-Search messages by various criteria.
+Search messages by various criteria. Date filters use IMAP semantics: `since` is inclusive, `before` is exclusive.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -187,20 +201,24 @@ Search messages by various criteria.
 | `to` | No | Filter by recipient |
 | `subject` | No | Filter by subject (substring match) |
 | `body` | No | Filter by body content (substring match) |
-| `since` | No | Messages since date (`YYYY-MM-DD`) |
-| `before` | No | Messages before date (`YYYY-MM-DD`) |
+| `since` | No | Messages on or after this date (`YYYY-MM-DD`, inclusive) |
+| `before` | No | Messages strictly before this date (`YYYY-MM-DD`, exclusive) |
 | `seen` | No | `true` = read, `false` = unread |
 | `flagged` | No | Filter by flagged/starred status |
 | `limit` | No | Max results, 1-100 (default: `20`) |
 
 #### `get_thread`
 
-Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first). Searches within a single folder.
+Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first).
+
+Prefer `messageId` — Message-IDs are globally unique, so this sidesteps the UID-collision footgun (UIDs are per-folder in IMAP) and walks INBOX + Sent + All Mail by default to catch replies that span folders. Output rows are tagged `UID X @FolderName` to disambiguate per-folder copies.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `uid` | Yes | UID of any message in the thread |
-| `folder` | No | Folder to search in (default: `INBOX`) |
+| `messageId` | No | RFC 5322 Message-ID (preferred over `uid`+`folder`) |
+| `uid` | No | UID of a thread message (used when `messageId` is omitted; folder-scoped) |
+| `folder` | No | Folder the UID lives in when using `uid` mode (default: `INBOX`) |
+| `folders` | No | Override the default folder walk when `messageId` is set (default: `["INBOX", "Sent", "All Mail"]`) |
 | `limit` | No | Max messages to return, 1-50 (default: `25`) |
 
 ### Organizing
@@ -227,7 +245,7 @@ Delete a message. By default moves to Trash for safety; set `permanent=true` to 
 
 #### `update_message_flags`
 
-Add or remove flags on a message. Common flags: `\Seen` (read), `\Flagged` (starred), `\Answered`, `\Draft`, `\Deleted`.
+Add or remove flags on a message. RFC 3501 system flags: `\Seen` (read), `\Flagged` (starred), `\Answered`, `\Draft`, `\Deleted`, `\Recent`. User-defined keywords without a backslash prefix are also accepted (alphanumeric + underscore, e.g. `Important`, `Custom_Tag`). Unknown `\`-prefixed names are rejected.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -243,7 +261,7 @@ Mark all unread messages in a folder as read. Optionally limit to messages older
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `folder` | No | Folder to mark as read (default: `INBOX`) |
-| `olderThan` | No | Only mark messages before this date as read (`YYYY-MM-DD`) |
+| `olderThan` | No | Only mark messages strictly before this date (`YYYY-MM-DD`, exclusive) |
 
 ## Configuration
 

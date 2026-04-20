@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { EmailService, EmailConfig } from "./email-service.js";
 import { ImapService, ImapConfig } from "./imap-service.js";
-import { isValidEmailAddress, validateImapFlag, sanitizeErrorMessage } from "./validation.js";
+import { isValidEmailAddress, validateImapFlag, sanitizeErrorMessage, isValidDateString } from "./validation.js";
 
 // Get environment variables for SMTP configuration
 const PROTONMAIL_USERNAME = process.env.PROTONMAIL_USERNAME;
@@ -53,6 +53,9 @@ function debugLog(message: string): void {
     console.error(message);
   }
 }
+
+/** Zod schema shared by all IMAP date filters: strictly YYYY-MM-DD. */
+const dateString = z.string().refine(isValidDateString, "Date must be a valid YYYY-MM-DD calendar date");
 
 /**
  * Produce a safe error message for MCP clients. Delegates to validation.ts
@@ -99,7 +102,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "0.4.1",
+  version: "0.5.0",
 });
 
 // Validate comma-separated email addresses, rejecting dangerous characters
@@ -170,7 +173,9 @@ if (!READONLY)
           .max(10_000, "Reply-To field too long")
           .refine(validateAddresses, "Reply-To must be a valid email")
           .optional()
-          .describe("Reply-To email address"),
+          .describe(
+            "Reply-To email address. Note: Proton SMTP may rewrite or ignore values that don't match authenticated identities.",
+          ),
         fromName: z.string().max(200, "From name too long").optional().describe("Display name for the From field"),
         attachments: z
           .array(
@@ -218,11 +223,15 @@ if (!READONLY)
           // Non-fatal — indexing delay or folder name mismatch
         }
 
+        // BCC count is shown but not the addresses — protects against logs leaking
+        // the BCC list while still signaling "yes, BCC was included".
+        const bccCount = bcc ? bcc.split(",").filter((s) => s.trim().length > 0).length : 0;
+        const bccInfo = bccCount > 0 ? ` and BCC to ${bccCount} recipient${bccCount === 1 ? "" : "s"}` : "";
         return {
           content: [
             {
               type: "text" as const,
-              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bcc ? ` and BCC to ${bcc}` : ""}. (Message-ID: ${info.messageId})${sentUidInfo}`,
+              text: `Email sent successfully to ${to}${cc ? ` with CC to ${cc}` : ""}${bccInfo}. (Message-ID: ${info.messageId})${sentUidInfo}`,
             },
           ],
         };
@@ -398,9 +407,14 @@ if (!READONLY)
           .refine(validateAddresses, "Each BCC address must be a valid email")
           .optional()
           .describe("BCC recipients, separated by commas"),
+        includeAttachments: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Include the original attachments in the forward (default: true)"),
       },
     },
-    async ({ uid, folder, to, body, isHtml, cc, bcc }) => {
+    async ({ uid, folder, to, body, isHtml, cc, bcc, includeAttachments }) => {
       debugLog(`[Tool] Executing tool: forward_email (uid=${uid}, folder=${folder}, to=${to})`);
 
       if (!sendRateLimiter.check()) {
@@ -422,6 +436,22 @@ if (!READONLY)
           ? `${body}${separator}${originalHeaders}${originalContent}`
           : `${separator}${originalHeaders}${originalContent}`;
 
+        // Re-attach the original attachments by downloading each part and re-sending. Default on —
+        // users and agents generally expect a forward to carry the originals. Opt out with
+        // `includeAttachments: false` to forward the body alone.
+        let forwardAttachments: { filename: string; content: string; contentType: string }[] | undefined;
+        if (includeAttachments && original.attachments.length > 0) {
+          forwardAttachments = [];
+          for (const att of original.attachments) {
+            const downloaded = await imapService.downloadAttachment(folder, uid, att.partNumber);
+            forwardAttachments.push({
+              filename: downloaded.filename,
+              content: downloaded.content,
+              contentType: downloaded.contentType,
+            });
+          }
+        }
+
         const info = await emailService.sendEmail({
           to,
           subject,
@@ -431,13 +461,18 @@ if (!READONLY)
           bcc,
           inReplyTo: original.messageId,
           references: original.messageId,
+          attachments: forwardAttachments,
         });
 
+        const attachmentSuffix =
+          forwardAttachments && forwardAttachments.length > 0
+            ? ` with ${forwardAttachments.length} attachment${forwardAttachments.length === 1 ? "" : "s"}`
+            : "";
         return {
           content: [
             {
               type: "text" as const,
-              text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}. (Message-ID: ${info.messageId})`,
+              text: `Message forwarded to ${to}${cc ? ` with CC to ${cc}` : ""}${attachmentSuffix}. (Message-ID: ${info.messageId})`,
             },
           ],
         };
@@ -529,8 +564,18 @@ server.registerTool(
         })
         .join("\n");
 
+      // Pagination hint: if we hit the limit, more messages likely exist. Point the caller
+      // at the next page by surfacing the smallest UID as the `beforeUid` for the next call.
+      let paginationHint = "";
+      if (messages.length === limit) {
+        const minUid = Math.min(...messages.map((m) => m.uid));
+        paginationHint = `\n\nMore results likely available — pass beforeUid=${minUid} to list_messages for the next page.`;
+      }
+
       return {
-        content: [{ type: "text" as const, text: `${messages.length} messages in ${folder}:\n\n${formatted}` }],
+        content: [
+          { type: "text" as const, text: `${messages.length} messages in ${folder}:\n\n${formatted}${paginationHint}` },
+        ],
       };
     } catch (error) {
       console.error(`[Error] Failed to list messages: ${error instanceof Error ? error.message : String(error)}`);
@@ -563,14 +608,26 @@ server.registerTool(
         .max(500_000)
         .optional()
         .default(50_000)
-        .describe("Maximum body length in characters before truncation (default: 50000)"),
+        .describe("Maximum body length in characters before truncation (default: 50000, min: 100, max: 500000)"),
+      showHeaders: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include In-Reply-To, References, Reply-To, List-Unsubscribe, and List-ID headers (default: false)"),
+      stripUrls: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Drop anchor URLs from stripped-HTML output, keeping only link text. Useful for summarizing newsletters without burning tokens on tracking URLs (default: false).",
+        ),
     },
   },
-  async ({ uid, folder, preferHtml, maxBodyLength }) => {
+  async ({ uid, folder, preferHtml, maxBodyLength, showHeaders, stripUrls }) => {
     debugLog(`[Tool] Executing tool: read_message (uid=${uid}, folder=${folder})`);
 
     try {
-      const msg = await imapService.readMessage(folder, uid, { preferHtml, maxBodyLength });
+      const msg = await imapService.readMessage(folder, uid, { preferHtml, maxBodyLength, showHeaders, stripUrls });
       const parts: string[] = [
         `Subject: ${msg.subject}`,
         `From: ${msg.from}`,
@@ -580,6 +637,16 @@ server.registerTool(
         `Message-ID: ${msg.messageId}`,
         `Flags: ${msg.flags.join(", ") || "none"}`,
       ];
+
+      if (msg.extraHeaders && Object.keys(msg.extraHeaders).length > 0) {
+        parts.push("");
+        parts.push("--- Extra Headers ---");
+        for (const [name, value] of Object.entries(msg.extraHeaders)) {
+          // Canonicalize header name for display (Title-Case each dash-separated word)
+          const display = name.replace(/(^|-)([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
+          parts.push(`${display}: ${value}`);
+        }
+      }
 
       if (msg.attachments.length > 0) {
         parts.push("");
@@ -607,6 +674,44 @@ server.registerTool(
       console.error(`[Error] Failed to read message: ${error instanceof Error ? error.message : String(error)}`);
       return {
         content: [{ type: "text" as const, text: `Failed to read message: ${sanitizeError(error)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "list_attachments",
+  {
+    description:
+      "List attachment metadata for a message without downloading the body. Returns part numbers, filenames, content types, and sizes — use these with download_attachment to fetch the content.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      uid: z.number().int().min(1).describe("Message UID (use list_messages or search_messages to find UIDs)"),
+      folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
+    },
+  },
+  async ({ uid, folder }) => {
+    debugLog(`[Tool] Executing tool: list_attachments (uid=${uid}, folder=${folder})`);
+
+    try {
+      const atts = await imapService.listAttachments(folder, uid);
+      if (atts.length === 0) {
+        return { content: [{ type: "text" as const, text: `No attachments on UID ${uid} in ${folder}.` }] };
+      }
+      const lines = atts.map((a) => `  [${a.partNumber}] ${a.filename} (${a.contentType}, ${a.size} bytes)`);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `${atts.length} attachment(s) on UID ${uid} in ${folder}:\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error(`[Error] Failed to list attachments: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [{ type: "text" as const, text: `Failed to list attachments: ${sanitizeError(error)}` }],
         isError: true,
       };
     }
@@ -665,8 +770,12 @@ server.registerTool(
       to: z.string().optional().describe("Filter by recipient email address"),
       subject: z.string().optional().describe("Filter by subject (substring match)"),
       body: z.string().optional().describe("Filter by body content (substring match)"),
-      since: z.string().optional().describe("Messages since this date (YYYY-MM-DD)"),
-      before: z.string().optional().describe("Messages before this date (YYYY-MM-DD)"),
+      since: dateString
+        .optional()
+        .describe("Messages since this date (YYYY-MM-DD, inclusive — includes messages on this date)"),
+      before: dateString
+        .optional()
+        .describe("Messages before this date (YYYY-MM-DD, exclusive — messages strictly before this date)"),
       seen: z.boolean().optional().describe("Filter by read status: true=read, false=unread"),
       flagged: z.boolean().optional().describe("Filter by flagged/starred status"),
       limit: z
@@ -832,7 +941,7 @@ if (!READONLY)
     "update_message_flags",
     {
       description:
-        "Add or remove flags on an email message. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted",
+        'Add or remove flags on an email message. System flags (RFC 3501): \\\\Seen (read), \\\\Flagged (starred), \\\\Answered, \\\\Draft, \\\\Deleted, \\\\Recent. User-defined keywords without a backslash prefix are also accepted (alphanumeric + underscore, e.g. "Important", "Custom_Tag").',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         uid: z.number().int().min(1).describe("Message UID"),
@@ -895,11 +1004,33 @@ server.registerTool(
   "get_thread",
   {
     description:
-      "Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first). Searches within a single folder.",
+      "Get all messages in a conversation thread by walking In-Reply-To and References headers. Returns messages sorted chronologically (oldest first).\n\n" +
+      "PREFERRED: pass `messageId` — Message-IDs are globally unique, so this sidesteps the UID-collision footgun and walks INBOX + Sent + All Mail by default to catch replies that span folders.\n\n" +
+      "Legacy: passing `uid` + `folder` searches only within that folder. UIDs are per-folder in IMAP, so the same UID in two folders refers to different messages — use `messageId` when possible.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
-      uid: z.number().int().min(1).describe("UID of any message in the thread"),
-      folder: z.string().optional().default("INBOX").describe("Folder to search in (default: INBOX)"),
+      messageId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "RFC 5322 Message-ID of any message in the thread (e.g. <abc@example.com>). Preferred over uid+folder.",
+        ),
+      uid: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("UID of a thread message (only used when messageId is omitted; folder-scoped)"),
+      folder: z
+        .string()
+        .optional()
+        .default("INBOX")
+        .describe("Folder the UID lives in (ignored when messageId is set)"),
+      folders: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Override the default folder walk when messageId is set (default: INBOX, Sent, All Mail)"),
       limit: z
         .number()
         .int()
@@ -910,11 +1041,20 @@ server.registerTool(
         .describe("Maximum messages to return (default: 25, max: 50)"),
     },
   },
-  async ({ uid, folder, limit }) => {
-    debugLog(`[Tool] Executing tool: get_thread (uid=${uid}, folder=${folder})`);
+  async ({ messageId, uid, folder, folders, limit }) => {
+    debugLog(`[Tool] Executing tool: get_thread (messageId=${messageId ?? "(none)"}, uid=${uid ?? "(none)"})`);
+
+    if (!messageId && !uid) {
+      return {
+        content: [{ type: "text" as const, text: "Provide either `messageId` (preferred) or `uid`." }],
+        isError: true,
+      };
+    }
 
     try {
-      const messages = await imapService.getThread(folder, uid, limit);
+      const messages = messageId
+        ? await imapService.getThreadByMessageId(messageId, limit, folders)
+        : await imapService.getThread(folder, uid as number, limit);
       if (messages.length === 0) {
         return { content: [{ type: "text" as const, text: "No thread messages found." }] };
       }
@@ -922,7 +1062,8 @@ server.registerTool(
       const formatted = messages
         .map((m) => {
           const flags = m.flags.length > 0 ? ` [${m.flags.join(", ")}]` : "";
-          return `UID ${m.uid} | ${m.date} | From: ${m.from} | ${m.subject}${flags}`;
+          const folderTag = (m as { folder?: string }).folder ? ` @${(m as { folder?: string }).folder}` : "";
+          return `UID ${m.uid}${folderTag} | ${m.date} | From: ${m.from} | ${m.subject}${flags}`;
         })
         .join("\n");
 
@@ -948,7 +1089,11 @@ if (!READONLY)
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         folder: z.string().optional().default("INBOX").describe("Folder to mark as read (default: INBOX)"),
-        olderThan: z.string().optional().describe("Only mark messages before this date as read (YYYY-MM-DD)"),
+        olderThan: dateString
+          .optional()
+          .describe(
+            "Only mark messages before this date as read (YYYY-MM-DD, exclusive — messages strictly before this date)",
+          ),
       },
     },
     async ({ folder, olderThan }) => {
@@ -957,8 +1102,11 @@ if (!READONLY)
       try {
         const count = await imapService.markAllRead(folder, olderThan);
         if (count === 0) {
+          const emptyMsg = olderThan
+            ? `No unread messages older than ${olderThan} in ${folder}.`
+            : `No unread messages in ${folder}.`;
           return {
-            content: [{ type: "text" as const, text: `No unread messages in ${folder}.` }],
+            content: [{ type: "text" as const, text: emptyMsg }],
           };
         }
         return {
@@ -1011,10 +1159,19 @@ if (!READONLY)
           .refine(validateAddresses, "Each BCC address must be a valid email")
           .optional()
           .describe("BCC recipient(s), comma-separated"),
+        replyTo: z
+          .string()
+          .max(10_000, "Reply-To field too long")
+          .refine(validateAddresses, "Reply-To must be a valid email")
+          .optional()
+          .describe(
+            "Reply-To email address. Note: Proton SMTP may rewrite or ignore values that don't match authenticated identities.",
+          ),
+        fromName: z.string().max(200, "From name too long").optional().describe("Display name for the From field"),
         folder: z.string().optional().default("Drafts").describe("Folder to save the draft in (default: Drafts)"),
       },
     },
-    async ({ to, subject, body, isHtml, cc, bcc, folder }) => {
+    async ({ to, subject, body, isHtml, cc, bcc, replyTo, fromName, folder }) => {
       debugLog(`[Tool] Executing tool: save_draft (folder=${folder})`);
 
       try {
@@ -1025,6 +1182,8 @@ if (!READONLY)
           isHtml,
           cc,
           bcc,
+          replyTo,
+          fromName,
         });
 
         const result = await imapService.saveDraft(folder, rawMessage);

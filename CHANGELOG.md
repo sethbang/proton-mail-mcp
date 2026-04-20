@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-20
+
+### Added
+
+- **`list_attachments` tool** — fetch attachment metadata (part numbers, filenames, types, sizes) without downloading the body. Composes with `download_attachment` for bulk extraction workflows.
+- **`get_thread.messageId` input** — preferred over UID+folder; walks INBOX, Sent, and All Mail by default so cross-folder threads (the common case) are returned intact. New optional `folders` parameter lets callers override the default set. Output rows are tagged `UID X @FolderName` to disambiguate per-folder copies.
+- **`read_message.showHeaders`** — when `true`, surfaces `In-Reply-To`, `References`, `Reply-To`, `List-Unsubscribe`, and `List-ID` under an `--- Extra Headers ---` section. Handles RFC 5322 folded continuation lines.
+- **`read_message.stripUrls`** — when `true`, drops anchor URLs from stripped-HTML output so agents summarizing newsletters don't burn tokens on tracking URLs.
+- **`save_draft.fromName` and `save_draft.replyTo`** — feature parity with `send_email`.
+- **`forward_email.includeAttachments`** — defaults to `true` so forwards now carry original attachments as agents expect; set to `false` to forward the body alone.
+- **`list_messages` pagination hint** — when the result count equals the requested limit, the response footer suggests the `beforeUid` value to use for the next page.
+
+### Fixed
+
+- **Silent false success on bogus UIDs** for `delete_message`, `update_message_flags`, and `move_message`. IMAP STORE/DELETE/MOVE succeed silently against missing UIDs; we now pre-check existence via `fetchOne` and throw `"Message UID N not found in <folder>"` (matching the pattern `read_message` already used). Applies equally to `list_attachments` and `download_attachment`.
+- **Attachment content returned as body** in `read_message` for HTML messages that carried a `text/plain` attachment. The body-part selector previously matched on content-type only; it now skips parts with `Content-Disposition: attachment` so the body is the real body.
+- **`forward_email` dropped original attachments.** Forwards now download each attachment from the source message and re-attach.
+- **Folder-not-found errors are actionable across every folder-taking tool.** All `getMailboxLock` calls route through a shared helper that translates imapflow's canonical `err.mailboxMissing` / `err.serverResponseCode ∈ {NONEXISTENT, TRYCREATE}` signals into `"Folder not found: <path>"`. `move_message` destination failures now probe the destination with `client.status()` to distinguish missing folders from other failures. `saveDraft` append failures are translated the same way.
+- **Flag whitelist in `validateImapFlag`.** Previously `\`-prefixed names were accepted wholesale, so IMAP would silently drop unknown system flags like `\Bogus`. Now we accept only RFC 3501 system flags (`\Seen`, `\Flagged`, `\Answered`, `\Draft`, `\Deleted`, `\Recent`) plus alphanumeric user keywords per RFC 3501. The error message lists the allowed set.
+- **Date string validation** for `search_messages.since` / `search_messages.before` / `mark_all_read.olderThan`. New `isValidDateString` helper rejects anything that isn't a valid `YYYY-MM-DD` calendar date (catches `04-19-2026`, `2026-13-01`, `2026-02-29`, etc.).
+- **`download_attachment` errors are now actionable.** A bogus part number throws `"Part X not found on UID Y in <folder>; known parts: [2, 3]"` (or `[(none)]` when the message has no attachments) instead of imapflow's opaque `"Command failed"`.
+- **`mark_all_read` copy under `olderThan`.** When the filter matches zero messages, the response now says `"No unread messages older than <date> in <folder>"` instead of implying the folder has no unread mail.
+- **BCC addresses are no longer echoed verbatim** in the `send_email` success response. Masked to `"and BCC to N recipient(s)"` so verbatim-logged output doesn't leak the BCC list.
+
+### Changed
+
+- Tool descriptions updated to document semantics that were previously implicit:
+  - `update_message_flags` now lists both RFC 3501 system flags and user keywords.
+  - `send_email.replyTo` and `save_draft.replyTo` note that Proton SMTP may rewrite non-authenticated values.
+  - `search_messages.since` is documented as inclusive; `search_messages.before` and `mark_all_read.olderThan` as exclusive.
+  - `read_message.maxBodyLength` surfaces its 100..500 000 range in prose.
+
 ## [0.4.1] - 2026-04-19
 
 ### Fixed
@@ -73,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security hardening: input validation, credential sanitization in error messages, rate limiting (10 emails/min), attachment size limits.
 - Debug logging to stderr via `DEBUG=true`.
 
+[0.5.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/sethbang/proton-mail-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.2.1...v0.3.0

@@ -46,7 +46,15 @@ export interface MessageDetail {
   truncated: boolean;
   originalLength?: number;
   attachments: AttachmentMeta[];
+  /** Additional headers parsed from the raw message, only when `showHeaders: true` was passed. */
+  extraHeaders?: Record<string, string>;
 }
+
+/** Default folder set walked by get_thread when searching across a mailbox. */
+export const DEFAULT_THREAD_FOLDERS = ["INBOX", "Sent", "All Mail"];
+
+/** Extra headers requested/parsed when readMessage is called with `showHeaders: true`. */
+const EXTRA_HEADER_NAMES = ["in-reply-to", "references", "reply-to", "list-unsubscribe", "list-id"];
 
 export interface MoveResult {
   success: boolean;
@@ -72,12 +80,15 @@ const DEFAULT_MAX_BODY_LENGTH = 50_000;
 
 /**
  * Find the MIME part number for a given content type in a bodyStructure tree.
- * Returns the first match (depth-first).
+ * Returns the first match (depth-first). Parts marked `Content-Disposition: attachment`
+ * are skipped — selecting a text/plain attachment as the body would silently return
+ * the attachment's content to the caller instead of the real body.
  *
  * Single-part messages have no `part` field on the root node — IMAP
  * implicitly treats those as part "1".
  */
 function findPartNumber(structure: MessageStructureObject, targetType: string): string | undefined {
+  if (structure.disposition === "attachment") return undefined;
   if (structure.type === targetType) return structure.part || "1";
   if (structure.childNodes) {
     for (const child of structure.childNodes) {
@@ -92,15 +103,61 @@ function findPartNumber(structure: MessageStructureObject, targetType: string): 
  * Convert HTML to readable plain text using html-to-text.
  * Preserves links as `text [url]`, skips images/tracking pixels,
  * and handles whitespace, entities, and list formatting.
+ *
+ * `stripUrls: true` drops anchor hrefs entirely — only the visible link text
+ * remains. Useful for summarizing newsletters without burning tokens on
+ * tracking URLs.
  */
-function stripHtml(html: string): string {
+function stripHtml(html: string, stripUrls = false): string {
+  const anchorOptions = stripUrls ? { ignoreHref: true } : { hideLinkHrefIfSameAsText: true };
   return convert(html, {
     wordwrap: false,
     selectors: [
-      { selector: "a", options: { hideLinkHrefIfSameAsText: true } },
+      { selector: "a", options: anchorOptions },
       { selector: "img", format: "skip" },
     ],
   });
+}
+
+/**
+ * Parse RFC 5322 header fields from a raw headers buffer.
+ * Handles folded continuation lines (leading WSP on subsequent lines).
+ * Returns a lowercase-keyed map of header name → value.
+ */
+function parseHeaders(raw: string, wanted: readonly string[]): Record<string, string> {
+  const wantedSet = new Set(wanted.map((n) => n.toLowerCase()));
+  // Unfold: join continuation lines (a line starting with space/tab belongs to the previous header).
+  const unfolded = raw.replace(/\r?\n[ \t]+/g, " ");
+  const out: Record<string, string> = {};
+  for (const line of unfolded.split(/\r?\n/)) {
+    const match = line.match(/^([^\s:]+):\s*(.*)$/);
+    if (!match) continue;
+    const name = match[1].toLowerCase();
+    if (!wantedSet.has(name)) continue;
+    out[name] = match[2].trim();
+  }
+  return out;
+}
+
+/**
+ * Recognize imapflow / IMAP server responses that indicate the target mailbox doesn't exist.
+ *
+ * imapflow sets canonical signals on the error we should trust first:
+ *  - `err.mailboxMissing = true` — set by getMailboxLock when SELECT fails NO and a LIST probe
+ *    confirms the mailbox doesn't exist (imap-flow.js ~3580).
+ *  - `err.serverResponseCode` — e.g. "NONEXISTENT", "TRYCREATE" from the NO response code.
+ *
+ * The text fallback covers cases where imapflow hasn't annotated the error (defense in depth).
+ */
+function isMailboxMissingError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as Error & { mailboxMissing?: boolean; serverResponseCode?: string };
+  if (e.mailboxMissing === true) return true;
+  if (e.serverResponseCode === "NONEXISTENT" || e.serverResponseCode === "TRYCREATE") return true;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("no such mailbox") || msg.includes("mailbox doesn't exist") || msg.includes("mailbox does not exist")
+  );
 }
 
 /**
@@ -132,6 +189,22 @@ export class ImapService {
   private log(message: string): void {
     if (this.debug) {
       console.error(message);
+    }
+  }
+
+  /**
+   * Acquire a mailbox lock, translating imapflow's mailbox-missing signals into a
+   * uniform "Folder not found: <path>" error. Every folder-taking operation should
+   * route through this instead of calling getMailboxLock directly.
+   */
+  private async lockFolder(client: ImapFlow, folder: string): ReturnType<ImapFlow["getMailboxLock"]> {
+    try {
+      return await client.getMailboxLock(folder);
+    } catch (err) {
+      if (isMailboxMissingError(err)) {
+        throw new Error(`Folder not found: ${folder}`);
+      }
+      throw err;
     }
   }
 
@@ -192,7 +265,7 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
         let result: number[] | false;
         if (beforeUid) {
@@ -225,28 +298,30 @@ export class ImapService {
   async readMessage(
     folder: string,
     uid: number,
-    options?: { preferHtml?: boolean; maxBodyLength?: number },
+    options?: { preferHtml?: boolean; maxBodyLength?: number; showHeaders?: boolean; stripUrls?: boolean },
   ): Promise<MessageDetail> {
     validateFolderPath(folder);
     const preferHtml = options?.preferHtml ?? false;
     const maxLen = options?.maxBodyLength ?? DEFAULT_MAX_BODY_LENGTH;
+    const showHeaders = options?.showHeaders ?? false;
+    const stripUrls = options?.stripUrls ?? false;
     this.log(`[IMAP] Reading message UID ${uid} from ${folder}`);
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
         // Step 1: fetch metadata and structure (no body content yet)
-        const msg = await client.fetchOne(
-          String(uid),
-          {
-            uid: true,
-            envelope: true,
-            flags: true,
-            bodyStructure: true,
-          },
-          { uid: true },
-        );
+        const fetchOptions: Parameters<typeof client.fetchOne>[1] = {
+          uid: true,
+          envelope: true,
+          flags: true,
+          bodyStructure: true,
+        };
+        if (showHeaders) {
+          fetchOptions.headers = [...EXTRA_HEADER_NAMES];
+        }
+        const msg = await client.fetchOne(String(uid), fetchOptions, { uid: true });
 
         if (!msg) {
           throw new Error(`Message UID ${uid} not found in ${folder}`);
@@ -269,7 +344,7 @@ export class ImapService {
           bodyFormat = "text";
         } else if (htmlPartNum) {
           const rawHtml = await this.downloadPart(client, uid, htmlPartNum);
-          body = stripHtml(rawHtml);
+          body = stripHtml(rawHtml, stripUrls);
           bodyFormat = "html-stripped";
         } else if (msg.bodyStructure) {
           // Fallback: no text/plain or text/html found (e.g. PGP-encrypted).
@@ -291,6 +366,12 @@ export class ImapService {
           truncated = true;
         }
 
+        let extraHeaders: Record<string, string> | undefined;
+        if (showHeaders && msg.headers) {
+          const raw = Buffer.isBuffer(msg.headers) ? msg.headers.toString("utf-8") : String(msg.headers);
+          extraHeaders = parseHeaders(raw, EXTRA_HEADER_NAMES);
+        }
+
         return {
           uid: msg.uid,
           subject: msg.envelope?.subject || "",
@@ -305,6 +386,7 @@ export class ImapService {
           truncated,
           originalLength,
           attachments,
+          extraHeaders,
         };
       } finally {
         lock.release();
@@ -348,7 +430,7 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
         const query: SearchObject = {};
         if (criteria.from) query.from = criteria.from;
@@ -398,6 +480,10 @@ export class ImapService {
 
   /**
    * Download an attachment by part number. Returns base64-encoded content.
+   *
+   * Pre-checks both the UID and the partNumber against the message's bodyStructure
+   * so callers get actionable errors ("Part 42 not found on UID 7 ...; known parts: [2]")
+   * instead of imapflow's opaque "Command failed" when the part doesn't exist.
    */
   async downloadAttachment(
     folder: string,
@@ -410,8 +496,19 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
+        // Pre-check: fetch bodyStructure, verify UID exists and partNumber is a known attachment.
+        const msg = await client.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
+        if (!msg) {
+          throw new Error(`Message UID ${uid} not found in ${folder}`);
+        }
+        const knownAttachments = msg.bodyStructure ? ImapService.extractAttachments(msg.bodyStructure) : [];
+        if (!knownAttachments.some((a) => a.partNumber === partNumber)) {
+          const known = knownAttachments.map((a) => a.partNumber).join(", ") || "(none)";
+          throw new Error(`Part ${partNumber} not found on UID ${uid} in ${folder}; known parts: [${known}]`);
+        }
+
         const { meta, content } = await client.download(String(uid), partNumber, { uid: true });
         const chunks: Buffer[] = [];
         let totalSize = 0;
@@ -439,6 +536,18 @@ export class ImapService {
   }
 
   /**
+   * Confirm a UID resolves to a message in the current mailbox lock.
+   * IMAP STORE/DELETE/MOVE silently succeed against missing UIDs, so callers must
+   * pre-check or risk reporting false success.
+   */
+  private async assertUidExists(client: ImapFlow, folder: string, uid: number): Promise<void> {
+    const exists = await client.fetchOne(String(uid), { uid: true }, { uid: true });
+    if (!exists) {
+      throw new Error(`Message UID ${uid} not found in ${folder}`);
+    }
+  }
+
+  /**
    * Move a message to a different folder.
    */
   async moveMessage(folder: string, uid: number, destination: string): Promise<MoveResult> {
@@ -448,10 +557,22 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
+        await this.assertUidExists(client, folder, uid);
         const result = await client.messageMove(String(uid), destination, { uid: true });
         if (result === false) {
+          // imapflow's messageMove swallows the COPY error (copy.js:42-46) and just returns
+          // false. To give the caller a meaningful message when the destination is missing,
+          // probe with status() — it throws with mailboxMissing when the mailbox doesn't exist.
+          try {
+            await client.status(destination, { messages: true });
+          } catch (err) {
+            if (isMailboxMissingError(err)) {
+              throw new Error(`Destination folder not found: ${destination}`);
+            }
+            // Probe itself failed for another reason — fall through to generic failure.
+          }
           return { success: false, destination };
         }
         const newUid = result.uidMap?.get(uid);
@@ -473,8 +594,9 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
+        await this.assertUidExists(client, folder, uid);
         return await client.messageDelete(String(uid), { uid: true });
       } finally {
         lock.release();
@@ -493,8 +615,9 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
+        await this.assertUidExists(client, folder, uid);
         if (flagsToAdd.length > 0) {
           await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
         }
@@ -502,6 +625,30 @@ export class ImapService {
           await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
         }
         return true;
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  /**
+   * Return attachment metadata for a message without downloading the body.
+   */
+  async listAttachments(folder: string, uid: number): Promise<AttachmentMeta[]> {
+    validateFolderPath(folder);
+    this.log(`[IMAP] Listing attachments for UID ${uid} in ${folder}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+      const lock = await this.lockFolder(client, folder);
+      try {
+        const msg = await client.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
+        if (!msg) {
+          throw new Error(`Message UID ${uid} not found in ${folder}`);
+        }
+        return msg.bodyStructure ? ImapService.extractAttachments(msg.bodyStructure) : [];
       } finally {
         lock.release();
       }
@@ -521,7 +668,7 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
         const query: SearchObject = { seen: false };
         if (olderThan) query.before = olderThan;
@@ -549,7 +696,7 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
         const result = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
         if (!result || result.length === 0) return undefined;
@@ -564,7 +711,7 @@ export class ImapService {
 
   /**
    * Get all messages in a conversation thread by walking References and In-Reply-To headers.
-   * Searches within a single folder.
+   * Searches within a single folder. Use `getThreadByMessageId` for cross-folder threads.
    */
   async getThread(folder: string, uid: number, limit: number): Promise<MessageSummary[]> {
     validateFolderPath(folder);
@@ -572,79 +719,176 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const lock = await client.getMailboxLock(folder);
+      const lock = await this.lockFolder(client, folder);
       try {
-        // Step 1: fetch the seed message's messageId and headers
-        const seed = await client.fetchOne(
-          String(uid),
-          { uid: true, envelope: true, headers: ["references"] },
-          { uid: true },
-        );
-        if (!seed) throw new Error(`Message UID ${uid} not found in ${folder}`);
-
-        const seedMessageId = seed.envelope?.messageId || "";
-        if (!seedMessageId) throw new Error(`Message UID ${uid} has no Message-ID`);
-
-        // Parse References header from the raw headers buffer
-        const headersStr = seed.headers ? seed.headers.toString("utf-8") : "";
-        const referencesMatch = headersStr.match(/^References:\s*(.+(?:\r?\n[ \t]+.+)*)/im);
-        const referencesRaw = referencesMatch ? referencesMatch[1].replace(/\r?\n[ \t]+/g, " ") : "";
-        const inReplyTo = seed.envelope?.inReplyTo || "";
-        const knownIds = new Set<string>();
-        knownIds.add(seedMessageId);
-
-        // Extract message-IDs from References header (space or newline separated)
-        const refMatches = referencesRaw.match(/<[^>]+>/g);
-        if (refMatches) {
-          for (const ref of refMatches) knownIds.add(ref);
-        }
-        if (inReplyTo) knownIds.add(inReplyTo);
-
-        // Step 2: search for all messages that reference any known ID, or are referenced
-        const allUids = new Set<number>();
-        allUids.add(uid);
-
-        for (const msgId of knownIds) {
-          // Find messages with this Message-ID
-          const byId = await client.search({ header: { "Message-ID": msgId } }, { uid: true });
-          if (byId && byId.length > 0) {
-            for (const u of byId) allUids.add(u);
-          }
-          // Find messages that reference this Message-ID
-          const byRef = await client.search({ header: { References: msgId } }, { uid: true });
-          if (byRef && byRef.length > 0) {
-            for (const u of byRef) allUids.add(u);
-          }
-          // Also check In-Reply-To
-          const byReply = await client.search({ header: { "In-Reply-To": msgId } }, { uid: true });
-          if (byReply && byReply.length > 0) {
-            for (const u of byReply) allUids.add(u);
-          }
-
-          if (allUids.size >= limit) break;
-        }
-
-        // Step 3: fetch envelopes for all found UIDs
-        const uidList = [...allUids].slice(0, limit);
-        const fetchRange = uidList.join(",");
-        const messages: MessageSummary[] = [];
-        for await (const msg of client.fetch(fetchRange, { uid: true, envelope: true, flags: true }, { uid: true })) {
-          messages.push(this.toSummary(msg));
-        }
-
-        // Sort chronologically (oldest first for thread reading)
-        messages.sort((a, b) => {
-          const da = a.date ? new Date(a.date).getTime() : 0;
-          const db = b.date ? new Date(b.date).getTime() : 0;
-          return da !== db ? da - db : a.uid - b.uid;
-        });
-        return messages;
+        const seed = await this.fetchThreadSeed(client, uid, folder);
+        const knownIds = this.collectSeedIds(seed);
+        const allUids = new Set<number>([uid]);
+        await this.walkReferences(client, knownIds, allUids, limit);
+        return await this.fetchThreadEnvelopes(client, allUids, limit);
       } finally {
         lock.release();
       }
     } finally {
       await client.logout().catch(() => {});
     }
+  }
+
+  /**
+   * Walk a conversation thread by Message-ID across the default folder set
+   * (INBOX + Sent + All Mail). Avoids the UID-collision footgun of `getThread`:
+   * Message-IDs are globally unique, UIDs are per-folder.
+   *
+   * Missing folders (e.g. "All Mail" on providers that don't ship it) are skipped.
+   * Returns messages tagged with their source folder so the caller can navigate back.
+   */
+  async getThreadByMessageId(
+    messageId: string,
+    limit: number,
+    folders: readonly string[] = DEFAULT_THREAD_FOLDERS,
+  ): Promise<MessageSummary[]> {
+    for (const folder of folders) validateFolderPath(folder);
+    this.log(`[IMAP] Getting thread by Message-ID ${messageId} across ${folders.join(", ")}`);
+    const client = this.createClient();
+    try {
+      await client.connect();
+
+      // Step 1: locate the seed message by Message-ID. Walk folders until found.
+      let seedFolder: string | undefined;
+      let seedUid: number | undefined;
+      for (const folder of folders) {
+        let lock;
+        try {
+          lock = await client.getMailboxLock(folder);
+        } catch (err) {
+          if (isMailboxMissingError(err)) continue;
+          throw err;
+        }
+        try {
+          const found = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
+          if (found && found.length > 0) {
+            seedFolder = folder;
+            seedUid = found[found.length - 1];
+            break;
+          }
+        } finally {
+          lock.release();
+        }
+      }
+
+      if (seedFolder === undefined || seedUid === undefined) {
+        throw new Error(`Message with Message-ID ${messageId} not found in ${folders.join(", ")}`);
+      }
+
+      // Step 2: fetch the seed headers to find related Message-IDs.
+      const seedLock = await this.lockFolder(client, seedFolder);
+      let knownIds: Set<string>;
+      try {
+        const seed = await this.fetchThreadSeed(client, seedUid, seedFolder);
+        knownIds = this.collectSeedIds(seed);
+      } finally {
+        seedLock.release();
+      }
+
+      // Step 3: walk each folder collecting UIDs that match any known Message-ID.
+      const perFolder = new Map<string, Set<number>>();
+      for (const folder of folders) {
+        let lock;
+        try {
+          lock = await client.getMailboxLock(folder);
+        } catch (err) {
+          if (isMailboxMissingError(err)) continue;
+          throw err;
+        }
+        try {
+          const uids = new Set<number>();
+          if (folder === seedFolder) uids.add(seedUid);
+          await this.walkReferences(client, knownIds, uids, limit);
+          if (uids.size > 0) perFolder.set(folder, uids);
+        } finally {
+          lock.release();
+        }
+      }
+
+      // Step 4: fetch envelopes per-folder and merge.
+      const merged: (MessageSummary & { folder: string })[] = [];
+      for (const [folder, uids] of perFolder.entries()) {
+        const lock = await this.lockFolder(client, folder);
+        try {
+          const envelopes = await this.fetchThreadEnvelopes(client, uids, limit);
+          for (const env of envelopes) merged.push({ ...env, folder });
+        } finally {
+          lock.release();
+        }
+      }
+
+      // De-duplicate by Message-ID would be ideal but our summaries don't carry it;
+      // UIDs are per-folder so the { folder, uid } tuple is unique.
+      merged.sort((a, b) => {
+        const da = a.date ? new Date(a.date).getTime() : 0;
+        const db = b.date ? new Date(b.date).getTime() : 0;
+        return da !== db ? da - db : a.uid - b.uid;
+      });
+      return merged.slice(0, limit);
+    } finally {
+      await client.logout().catch(() => {});
+    }
+  }
+
+  private async fetchThreadSeed(client: ImapFlow, uid: number, folder: string): Promise<FetchMessageObject> {
+    const seed = await client.fetchOne(
+      String(uid),
+      { uid: true, envelope: true, headers: ["references"] },
+      { uid: true },
+    );
+    if (!seed) throw new Error(`Message UID ${uid} not found in ${folder}`);
+    if (!seed.envelope?.messageId) throw new Error(`Message UID ${uid} has no Message-ID`);
+    return seed;
+  }
+
+  private collectSeedIds(seed: FetchMessageObject): Set<string> {
+    const ids = new Set<string>();
+    if (seed.envelope?.messageId) ids.add(seed.envelope.messageId);
+    const headersStr = seed.headers ? seed.headers.toString("utf-8") : "";
+    const referencesMatch = headersStr.match(/^References:\s*(.+(?:\r?\n[ \t]+.+)*)/im);
+    const referencesRaw = referencesMatch ? referencesMatch[1].replace(/\r?\n[ \t]+/g, " ") : "";
+    const refMatches = referencesRaw.match(/<[^>]+>/g);
+    if (refMatches) for (const ref of refMatches) ids.add(ref);
+    if (seed.envelope?.inReplyTo) ids.add(seed.envelope.inReplyTo);
+    return ids;
+  }
+
+  private async walkReferences(
+    client: ImapFlow,
+    knownIds: Set<string>,
+    collected: Set<number>,
+    limit: number,
+  ): Promise<void> {
+    for (const msgId of knownIds) {
+      const byId = await client.search({ header: { "Message-ID": msgId } }, { uid: true });
+      if (byId && byId.length > 0) for (const u of byId) collected.add(u);
+      const byRef = await client.search({ header: { References: msgId } }, { uid: true });
+      if (byRef && byRef.length > 0) for (const u of byRef) collected.add(u);
+      const byReply = await client.search({ header: { "In-Reply-To": msgId } }, { uid: true });
+      if (byReply && byReply.length > 0) for (const u of byReply) collected.add(u);
+      if (collected.size >= limit) break;
+    }
+  }
+
+  private async fetchThreadEnvelopes(client: ImapFlow, uids: Set<number>, limit: number): Promise<MessageSummary[]> {
+    if (uids.size === 0) return [];
+    const uidList = [...uids].slice(0, limit);
+    const fetchRange = uidList.join(",");
+    const messages: MessageSummary[] = [];
+    for await (const msg of client.fetch(fetchRange, { uid: true, envelope: true, flags: true }, { uid: true })) {
+      messages.push(this.toSummary(msg));
+    }
+    messages.sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return da !== db ? da - db : a.uid - b.uid;
+    });
+    return messages;
   }
 
   /**
@@ -657,7 +901,15 @@ export class ImapService {
     const client = this.createClient();
     try {
       await client.connect();
-      const result = await client.append(folder, rawMessage, ["\\Draft", "\\Seen"]);
+      let result;
+      try {
+        result = await client.append(folder, rawMessage, ["\\Draft", "\\Seen"]);
+      } catch (err) {
+        if (isMailboxMissingError(err)) {
+          throw new Error(`Folder not found: ${folder}`);
+        }
+        throw err;
+      }
       if (result === false) {
         throw new Error(`Failed to save draft to ${folder}`);
       }
