@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-19
+
+### Fixed
+
+- **Critical: `list_messages` and `search_messages` no longer fail with "Connection not available"** on real IMAP connections. The v0.4.0 refactor introduced `return this.fetchSortAndLimit(...)` without `await`, which caused the outer `try/finally` to close the IMAP connection (via `client.logout()`) before the fetch iterator resolved. Unit tests passed because mocks have no real connection state. Fixed by adding `await` to both call sites and adding regression tests that simulate connection closure mid-fetch.
+
 ## [0.4.0] - 2026-04-17
 
 ### Added
@@ -67,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security hardening: input validation, credential sanitization in error messages, rate limiting (10 emails/min), attachment size limits.
 - Debug logging to stderr via `DEBUG=true`.
 
+[0.4.1]: https://github.com/sethbang/proton-mail-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sethbang/proton-mail-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/sethbang/proton-mail-mcp/compare/v0.2.0...v0.2.1

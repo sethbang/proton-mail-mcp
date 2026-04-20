@@ -485,6 +485,53 @@ describe("ImapService", () => {
       expect(result[0].subject).toBe("Newest"); // Apr 15
       expect(result[1].subject).toBe("Second"); // Apr 14
     });
+
+    // Regression test for v0.4.0 bug: `return this.fetchSortAndLimit(...)` without
+    // await caused the outer try/finally to run client.logout() BEFORE the fetch
+    // iterator resolved, closing the connection mid-fetch. Real IMAP connections
+    // then threw "Connection not available" but tests passed because mocks had no
+    // real connection state. This test simulates that connection state.
+    it("awaits fetch to complete before closing connection", async () => {
+      let logoutCalled = false;
+      mockSearch.mockResolvedValueOnce([1, 2, 3]);
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          // Yield to the event loop so any pending finally blocks can run.
+          // If the outer try/finally runs client.logout() before we resume,
+          // we simulate the real imapflow "Connection not available" error.
+          await new Promise((resolve) => setImmediate(resolve));
+          if (logoutCalled) {
+            throw new Error("Connection not available");
+          }
+          yield {
+            uid: 1,
+            envelope: { date: new Date("2026-04-15T10:00:00Z"), from: [{ address: "a@x.com" }] },
+            flags: new Set(),
+          };
+          yield {
+            uid: 2,
+            envelope: { date: new Date("2026-04-14T10:00:00Z"), from: [{ address: "b@x.com" }] },
+            flags: new Set(),
+          };
+          yield {
+            uid: 3,
+            envelope: { date: new Date("2026-04-13T10:00:00Z"), from: [{ address: "c@x.com" }] },
+            flags: new Set(),
+          };
+        })(),
+      );
+
+      mockLogout.mockImplementationOnce(async () => {
+        logoutCalled = true;
+      });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.listMessages("INBOX", 3);
+
+      expect(result).toHaveLength(3);
+      expect(logoutCalled).toBe(true); // Logout ran, but AFTER fetch completed
+    });
   });
 
   describe("searchMessages ordering", () => {
@@ -643,6 +690,42 @@ describe("ImapService", () => {
 
       // Verify ALL 10 UIDs were fetched, not just the last 5
       expect(mockFetch).toHaveBeenCalledWith("69,70,71,72,73,112,113,114,115,121", expect.anything(), { uid: true });
+    });
+
+    // Same regression as listMessages — searchMessages also called fetchSortAndLimit
+    // without await, causing logout to close the connection mid-fetch.
+    it("awaits fetch to complete before closing connection", async () => {
+      let logoutCalled = false;
+      mockSearch.mockResolvedValueOnce([1, 2]);
+
+      mockFetch.mockReturnValueOnce(
+        (async function* () {
+          await new Promise((resolve) => setImmediate(resolve));
+          if (logoutCalled) {
+            throw new Error("Connection not available");
+          }
+          yield {
+            uid: 1,
+            envelope: { date: new Date("2026-04-15T10:00:00Z"), from: [{ address: "a@x.com" }] },
+            flags: new Set(),
+          };
+          yield {
+            uid: 2,
+            envelope: { date: new Date("2026-04-14T10:00:00Z"), from: [{ address: "b@x.com" }] },
+            flags: new Set(),
+          };
+        })(),
+      );
+
+      mockLogout.mockImplementationOnce(async () => {
+        logoutCalled = true;
+      });
+
+      const service = new ImapService(baseConfig);
+      const result = await service.searchMessages("INBOX", { from: "test" }, 10);
+
+      expect(result).toHaveLength(2);
+      expect(logoutCalled).toBe(true);
     });
   });
 

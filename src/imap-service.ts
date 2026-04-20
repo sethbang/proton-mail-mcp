@@ -202,7 +202,7 @@ export class ImapService {
         }
         if (!result || result.length === 0) return [];
 
-        return this.fetchSortAndLimit(client, result, limit);
+        return await this.fetchSortAndLimit(client, result, limit);
       } finally {
         lock.release();
       }
@@ -363,7 +363,7 @@ export class ImapService {
         const result = await client.search(query, { uid: true });
         if (!result || result.length === 0) return [];
 
-        return this.fetchSortAndLimit(client, result, limit);
+        return await this.fetchSortAndLimit(client, result, limit);
       } finally {
         lock.release();
       }
