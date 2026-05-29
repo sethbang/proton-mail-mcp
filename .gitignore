@@ -48,3 +48,7 @@ coverage/
 # Misc
 .cache/
 .temp/
+
+# Local-only dev docs (not shipped)
+CLAUDE.md
+docs/superpowers/

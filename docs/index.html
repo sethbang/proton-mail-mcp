@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      try {
+        var t = localStorage.getItem("theme");
+        if (t === "light" || t === "dark")
+          document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <title>proton-mail-mcp — MCP server for Proton Mail</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="container">
+        <h1 class="wordmark">proton-mail-mcp</h1>
+        <p class="tagline">
+          An MCP server for Proton Mail — send, read, search, and organize email
+          from any AI client.
+        </p>
+        <a class="btn btn-primary" href="https://github.com/sethbang/proton-mail-mcp"
+          >View on GitHub</a
+        >
+      </div>
+    </header>
+
+    <section class="stats">
+      <div class="container">
+        <span>30+ tools</span>
+        <span aria-hidden="true">·</span>
+        <span>SMTP + IMAP</span>
+        <span aria-hidden="true">·</span>
+        <span>Proton Bridge native</span>
+        <span aria-hidden="true">·</span>
+        <span>MIT licensed</span>
+      </div>
+    </section>
+
+    <section class="features">
+      <div class="container">
+        <div class="feature-grid">
+          <article class="card">
+            <h2>Send, reply, forward</h2>
+            <p>With threading headers and attachment passthrough.</p>
+          </article>
+          <article class="card">
+            <h2>Search &amp; threads</h2>
+            <p>By sender, subject, body, date, attachments; cross-folder thread walks.</p>
+          </article>
+          <article class="card">
+            <h2>Bulk organize</h2>
+            <p>Move, delete, flag, and label hundreds of messages with dry-run previews.</p>
+          </article>
+          <article class="card">
+            <h2>Labels &amp; folders</h2>
+            <p>Create, rename, delete; full Proton label semantics.</p>
+          </article>
+          <article class="card">
+            <h2>Drafts</h2>
+            <p>Save to <code>\Drafts</code> via IMAP APPEND, ready to send from the Proton client.</p>
+          </article>
+          <article class="card">
+            <h2>Safe by default</h2>
+            <p><code>READONLY</code> mode, sanitized HTML, BCC masking, validated inputs.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="install">
+      <div class="container">
+        <h2>Install</h2>
+        <p class="muted">Add to your MCP client config:</p>
+        <div class="code-block">
+          <button class="copy-btn" type="button" data-copy="mcp-config" aria-label="Copy MCP config">Copy</button>
+          <pre id="mcp-config"><code>{
+  "mcpServers": {
+    "protonmail": {
+      "command": "node",
+      "args": ["/path/to/proton-mail-mcp/build/index.js"]
+    }
+  }
+}</code></pre>
+        </div>
+
+        <p class="muted">Environment variables:</p>
+        <div class="code-block">
+          <button class="copy-btn" type="button" data-copy="env-vars" aria-label="Copy environment variables">Copy</button>
+          <pre id="env-vars"><code>PROTONMAIL_USERNAME=your-email@pm.me
+PROTONMAIL_PASSWORD=your-smtp-password
+PROTONMAIL_HOST=smtp.protonmail.ch
+PROTONMAIL_PORT=587
+IMAP_HOST=127.0.0.1
+IMAP_PORT=1143</code></pre>
+        </div>
+
+        <p>
+          <a href="https://github.com/sethbang/proton-mail-mcp#readme"
+            >Full setup in the README →</a
+          >
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <div class="container footer-row">
+        <span class="muted">
+          MIT ·
+          <a href="https://github.com/sethbang/proton-mail-mcp">view source on GitHub</a>
+          · built for Proton Mail Bridge
+        </span>
+        <button
+          id="theme-toggle"
+          class="theme-toggle"
+          type="button"
+          aria-label="Theme: system"
+          title="Theme: system"
+        >
+          ◐
+        </button>
+      </div>
+    </footer>
+  </body>
+</html>
