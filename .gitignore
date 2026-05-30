@@ -52,3 +52,6 @@ coverage/
 # Local-only dev docs (not shipped)
 CLAUDE.md
 docs/superpowers/
+
+# Local-only demo seeding tooling (not shipped)
+scripts/seed-demo.mjs
