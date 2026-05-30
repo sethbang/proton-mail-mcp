@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.sethbang/proton-mail-mcp",
   "title": "Proton Mail (unofficial)",
-  "description": "Unofficial MCP server for Proton Mail (not affiliated with Proton AG) — send, read, search, and organize email over SMTP and IMAP",
+  "description": "Unofficial Proton Mail MCP — send, read, search & organize email over SMTP and IMAP",
   "websiteUrl": "https://sethbang.github.io/proton-mail-mcp/",
   "repository": {
     "url": "https://github.com/sethbang/proton-mail-mcp",
