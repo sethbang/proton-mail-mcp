@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/proton-mail-mcp.svg)](https://www.npmjs.com/package/proton-mail-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Glama score](https://glama.ai/mcp/servers/sethbang/proton-mail-mcp/badges/score.svg)](https://glama.ai/mcp/servers/sethbang/proton-mail-mcp)
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives AI assistants full access to your Proton Mail account -- send, read, search, and organize email over SMTP and IMAP.
 
