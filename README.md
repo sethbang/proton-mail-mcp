@@ -5,6 +5,8 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gives AI assistants full access to your Proton Mail account -- send, read, search, and organize email over SMTP and IMAP.
 
+> ⚠️ **Unofficial — not affiliated with Proton.** This is an independent, community-built project. It is **not** developed, endorsed, sponsored, or supported by Proton AG. "Proton", "Proton Mail", and "Proton Mail Bridge" are trademarks of Proton AG, used here only to describe interoperability. It talks to Proton Mail over the standard SMTP submission endpoint and the locally-run Proton Mail Bridge; no Proton private API is used. Use at your own risk.
+
 ## Features
 
 - **Send, reply, and forward** email via Proton Mail SMTP with threading headers; dedicated `reply_all_email` tool
