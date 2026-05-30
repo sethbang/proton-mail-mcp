@@ -1,7 +1,22 @@
 {
   "name": "proton-mail-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Unofficial MCP server for Proton Mail (not affiliated with Proton AG) — send, read, search, and organize email over SMTP and IMAP",
+  "mcpName": "io.github.sethbang/proton-mail-mcp",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "proton",
+    "proton-mail",
+    "protonmail",
+    "email",
+    "imap",
+    "smtp",
+    "nodemailer",
+    "claude",
+    "ai-tools"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/sethbang/proton-mail-mcp.git"
