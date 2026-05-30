@@ -9,13 +9,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that gi
 
 ## Demo
 
-<!-- DEMO GIF: replace the placeholder below with the recorded demo.
-     Suggested path: docs/demo.gif  →  ![Proton Mail MCP demo](docs/demo.gif)
-     Storyboard / recording instructions: docs/DEMO.md -->
-
-> _Demo coming soon — see [`docs/DEMO.md`](docs/DEMO.md) for the storyboard._
-
-<!-- ![Proton Mail MCP demo](docs/demo.gif) -->
+![Proton Mail MCP demo — triaging an inbox from an MCP client](docs/demo.gif)
 
 ## Features
 
