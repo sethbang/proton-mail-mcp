@@ -1,0 +1,260 @@
+:root {
+  --bg: #ffffff;
+  --bg-elevated: #faf8ff;
+  --text: #1a1430;
+  --text-muted: #6b6585;
+  --accent: #6d4aff;
+  --accent-soft: #ede8ff;
+  --border: #ece8f7;
+  --btn-primary-hover-bg: #1a1430;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #0e0b1a;
+  --bg-elevated: #171327;
+  --text: #f4f1ff;
+  --text-muted: #a39db8;
+  --accent: #8b6dff;
+  --accent-soft: #2a1f5c;
+  --border: #2a2440;
+  --btn-primary-hover-bg: #2a1f5c;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e0b1a;
+    --bg-elevated: #171327;
+    --text: #f4f1ff;
+    --text-muted: #a39db8;
+    --accent: #8b6dff;
+    --accent-soft: #2a1f5c;
+    --border: #2a2440;
+    --btn-primary-hover-bg: #2a1f5c;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  transition:
+    color 200ms ease,
+    background-color 200ms ease;
+}
+
+.container {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.95em;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+/* Hero */
+.hero {
+  padding: 6rem 0 5rem;
+  text-align: center;
+  background: radial-gradient(
+    ellipse at top,
+    var(--accent-soft),
+    transparent 60%
+  );
+  transition: background 200ms ease;
+}
+.wordmark {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: clamp(2.5rem, 5vw, 4rem);
+  color: var(--accent);
+  margin: 0 0 1rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.tagline {
+  font-size: 1.25rem;
+  max-width: 36rem;
+  margin: 0 auto 2.5rem;
+  color: var(--text-muted);
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.875rem 1.75rem;
+  font-weight: 500;
+  font-size: 1rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background-color 200ms ease,
+    color 200ms ease,
+    border-color 200ms ease;
+  text-decoration: none;
+}
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+.btn-primary:hover {
+  background: var(--btn-primary-hover-bg);
+  text-decoration: none;
+}
+
+/* Stats strip */
+.stats {
+  padding: 2rem 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.875rem;
+}
+.stats span {
+  margin: 0 0.75rem;
+}
+
+/* Features */
+.features {
+  padding: 4rem 0 5rem;
+}
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  background: var(--bg);
+  transition:
+    border-color 200ms ease,
+    background-color 200ms ease;
+}
+.card:hover {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+}
+.card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.125rem;
+  color: var(--text);
+}
+.card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+/* Install */
+.install {
+  padding: 4rem 0 5rem;
+}
+.install h2 {
+  font-size: 1.75rem;
+  margin: 0 0 1.5rem;
+}
+.install p.muted {
+  margin: 1.5rem 0 0.5rem;
+}
+.code-block {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0;
+}
+.code-block pre {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.875rem;
+  color: var(--text);
+}
+.copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    color 200ms ease,
+    border-color 200ms ease,
+    background-color 200ms ease;
+}
+.copy-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Footer */
+footer {
+  padding: 3rem 0 4rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+.footer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.theme-toggle {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 999px;
+  width: 2.25rem;
+  height: 2.25rem;
+  font-size: 1rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color 200ms ease,
+    border-color 200ms ease,
+    background-color 200ms ease;
+}
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

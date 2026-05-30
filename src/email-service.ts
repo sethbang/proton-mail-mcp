@@ -95,6 +95,35 @@ export class EmailService {
   }
 
   /**
+   * Build the nodemailer message options from an EmailMessage. Shared by
+   * sendEmail() (via transporter.sendMail) and buildRawMessage() (via
+   * MailComposer) so the From construction, HTML/plaintext fallback, threading
+   * headers, and attachment decoding stay identical across the send and
+   * draft-APPEND paths.
+   */
+  private buildMessageOptions(message: EmailMessage) {
+    const safeName = message.fromName ? sanitizeFromName(message.fromName) : "";
+    const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
+    return {
+      from,
+      to: message.to,
+      cc: message.cc,
+      bcc: message.bcc,
+      replyTo: message.replyTo,
+      subject: message.subject,
+      text: message.isHtml ? stripHtml(message.body) : message.body,
+      html: message.isHtml ? message.body : undefined,
+      inReplyTo: message.inReplyTo,
+      references: message.references,
+      attachments: message.attachments?.map((a) => ({
+        filename: sanitizeFilename(a.filename),
+        content: Buffer.from(a.content, "base64"),
+        contentType: a.contentType,
+      })),
+    };
+  }
+
+  /**
    * Send an email
    * @param message Email message to send
    * @returns Promise resolving to the nodemailer send info
@@ -105,25 +134,7 @@ export class EmailService {
     }
 
     try {
-      const safeName = message.fromName ? sanitizeFromName(message.fromName) : "";
-      const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
-      const info = await this.transporter.sendMail({
-        from,
-        to: message.to,
-        cc: message.cc,
-        bcc: message.bcc,
-        replyTo: message.replyTo,
-        subject: message.subject,
-        text: message.isHtml ? stripHtml(message.body) : message.body,
-        html: message.isHtml ? message.body : undefined,
-        inReplyTo: message.inReplyTo,
-        references: message.references,
-        attachments: message.attachments?.map((a) => ({
-          filename: sanitizeFilename(a.filename),
-          content: Buffer.from(a.content, "base64"),
-          contentType: a.contentType,
-        })),
-      });
+      const info = await this.transporter.sendMail(this.buildMessageOptions(message));
 
       if (this.debug) {
         console.error(`[Email] Email sent successfully: ${info.messageId}`);
@@ -141,25 +152,7 @@ export class EmailService {
    * Used for IMAP APPEND (e.g. saving drafts).
    */
   async buildRawMessage(message: EmailMessage): Promise<Buffer> {
-    const safeName = message.fromName ? sanitizeFromName(message.fromName) : "";
-    const from = safeName ? `"${safeName}" <${this.fromEmail}>` : this.fromEmail;
-    const composer = new MailComposer({
-      from,
-      to: message.to,
-      cc: message.cc,
-      bcc: message.bcc,
-      replyTo: message.replyTo,
-      subject: message.subject,
-      text: message.isHtml ? stripHtml(message.body) : message.body,
-      html: message.isHtml ? message.body : undefined,
-      inReplyTo: message.inReplyTo,
-      references: message.references,
-      attachments: message.attachments?.map((a) => ({
-        filename: sanitizeFilename(a.filename),
-        content: Buffer.from(a.content, "base64"),
-        contentType: a.contentType,
-      })),
-    });
+    const composer = new MailComposer(this.buildMessageOptions(message));
     return composer.compile().build();
   }
 
