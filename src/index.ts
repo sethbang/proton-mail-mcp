@@ -1667,8 +1667,8 @@ server.registerTool(
   "download_attachment",
   {
     description:
-      "Download an email attachment by part number. Use read_message or list_attachments first to see available attachments and their part numbers. By default returns base64-encoded content inline. When `saveTo` is provided AND the ALLOW_FILE_DOWNLOAD_DIR env var is set, writes the decoded bytes to that path inside the allowlist root and returns the file path + size instead of base64 (avoids blowing the token budget on large attachments).",
-    annotations: { readOnlyHint: true, idempotentHint: true },
+      "Download an email attachment by part number. Use read_message or list_attachments first to see available attachments and their part numbers. By default returns base64-encoded content inline (read-only). When `saveTo` is provided AND the ALLOW_FILE_DOWNLOAD_DIR env var is set, this tool WRITES the decoded bytes to that path inside the allowlist root and returns the file path + size instead of base64 (avoids blowing the token budget on large attachments) — that write is the only side effect, and it is why this tool is not marked read-only. Inline (no `saveTo`) calls do not touch the filesystem. Re-running with the same arguments is idempotent (overwrites the same file with identical bytes).",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       uid: z.number().int().min(1).describe("Message UID"),
       folder: z.string().optional().default("INBOX").describe("Folder containing the message (default: INBOX)"),
@@ -3068,8 +3068,18 @@ server.registerTool(
       "Count messages in a folder matching optional search criteria. Returns just a number (no envelopes fetched). The attachment filters (`hasAttachment`, `attachmentName`, `attachmentType`) are rejected here — they require an envelope scan that defeats the count's speed promise. Use search_messages for attachment-based filtering. A non-selectable namespace container (e.g. `Folders`/`Labels`) is rejected with an actionable error rather than returning 0.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
-      folder: z.string().optional().default("INBOX"),
-      match: countMatchSchema.optional(),
+      folder: z
+        .string()
+        .optional()
+        .default("INBOX")
+        .describe(
+          "Folder to count in (default: INBOX). A non-selectable namespace container like `Folders`/`Labels` is rejected.",
+        ),
+      match: countMatchSchema
+        .optional()
+        .describe(
+          "Optional search criteria to narrow the count (same fields as search_messages: from, to, subject, body, since, before, seen, flagged, larger, smaller, listId). Attachment filters are NOT allowed here — use search_messages for those. Omit to count every message in the folder.",
+        ),
     },
   },
   async ({ folder, match }) => {
@@ -3091,8 +3101,17 @@ server.registerTool(
       "Return aggregate stats for a folder: total/unread (free), plus scanned-envelope aggregations (oldest/newest/total bytes). Default scanLimit 5000, max 20000. Response always includes scanned/truncated so callers can detect partial results. A non-selectable namespace container (e.g. `Folders`/`Labels`) is rejected with an actionable error rather than reporting empty stats.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
-      folder: z.string().optional().default("INBOX"),
-      scanLimit: z.number().int().min(1).max(20000).optional().default(5000),
+      folder: z.string().optional().default("INBOX").describe("Folder to analyze (default: INBOX)."),
+      scanLimit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20000)
+        .optional()
+        .default(5000)
+        .describe(
+          "Max number of message envelopes to scan for the aggregations (oldest/newest date, total bytes), 1–20000 (default: 5000). Total/unread counts are always exact; only the scanned aggregations are capped. The response reports `scanned` and `truncated` so you know if the cap was hit — raise this for large folders if you need exact min/max dates.",
+        ),
     },
   },
   async ({ folder, scanLimit }) => {
@@ -3238,10 +3257,33 @@ if (!READONLY)
         "Delete every message in a thread. Default soft-deletes to Trash; permanent:true expunges. acrossFolders:false by default for safety. dryRun:true previews.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       inputSchema: {
-        messageId: z.string().min(1),
-        permanent: z.boolean().optional().default(false),
-        acrossFolders: z.boolean().optional().default(false),
-        dryRun: z.boolean().optional().default(false),
+        messageId: z
+          .string()
+          .min(1)
+          .describe(
+            "RFC 5322 Message-ID of any message in the thread (e.g. `<abc@example.com>`); the whole reply chain is resolved from it.",
+          ),
+        permanent: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When false (default), soft-delete the thread to Trash (recoverable). When true, permanently expunge every message — irreversible.",
+          ),
+        acrossFolders: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When false (default), act only within the seed message's folder. When true, walk INBOX + Sent + All Mail so the whole conversation is deleted across folders.",
+          ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When true, preview which messages would be deleted (per folder) without deleting anything. Recommended before a real run.",
+          ),
       },
     },
     async ({ messageId, permanent, acrossFolders, dryRun }) => {
@@ -3293,10 +3335,15 @@ if (!READONLY)
     "flag_thread",
     {
       description:
-        "Add or remove flags on every message in a thread. acrossFolders:false by default. dryRun:true previews.",
+        "Add or remove flags on every message in a thread, identified by Message-ID. Use this instead of update_message_flags when you want the change applied to a whole conversation, or bulk_update_flags when you have a flat set of UIDs rather than a thread. At least one of flagsToAdd/flagsToRemove must be non-empty. acrossFolders:false by default. dryRun:true previews.",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       inputSchema: {
-        messageId: z.string().min(1),
+        messageId: z
+          .string()
+          .min(1)
+          .describe(
+            "RFC 5322 Message-ID of any message in the thread (e.g. `<abc@example.com>`); the whole reply chain is resolved from it.",
+          ),
         flagsToAdd: z
           .array(
             z.string().refine((f) => {
@@ -3305,7 +3352,10 @@ if (!READONLY)
             }, "Invalid IMAP flag format"),
           )
           .optional()
-          .default([]),
+          .default([])
+          .describe(
+            'Flags to add to every message in the thread. System flags include the backslash (e.g. ["\\\\Seen", "\\\\Flagged"]); user keywords are bare alphanumerics (e.g. ["Important"]). At least one of flagsToAdd/flagsToRemove must be non-empty.',
+          ),
         flagsToRemove: z
           .array(
             z.string().refine((f) => {
@@ -3314,9 +3364,22 @@ if (!READONLY)
             }, "Invalid IMAP flag format"),
           )
           .optional()
-          .default([]),
-        acrossFolders: z.boolean().optional().default(false),
-        dryRun: z.boolean().optional().default(false),
+          .default([])
+          .describe(
+            'Flags to remove from every message in the thread (e.g. ["\\\\Seen"] to mark the whole thread unread, or ["\\\\Flagged"] to unstar).',
+          ),
+        acrossFolders: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When false (default), act only within the seed message's folder. When true, walk INBOX + Sent + All Mail so the flag change covers thread members in other folders.",
+          ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("When true, preview which messages would be updated (per folder) without changing any flags."),
       },
     },
     async ({ messageId, flagsToAdd, flagsToRemove, acrossFolders, dryRun }) => {
