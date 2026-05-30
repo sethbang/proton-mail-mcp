@@ -1,0 +1,128 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sethbang/proton-mail-mcp",
+  "title": "Proton Mail (unofficial)",
+  "description": "Unofficial MCP server for Proton Mail (not affiliated with Proton AG) — send, read, search, and organize email over SMTP and IMAP",
+  "websiteUrl": "https://sethbang.github.io/proton-mail-mcp/",
+  "repository": {
+    "url": "https://github.com/sethbang/proton-mail-mcp",
+    "source": "github"
+  },
+  "version": "1.0.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "proton-mail-mcp",
+      "version": "1.0.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PROTONMAIL_USERNAME",
+          "description": "Your Proton Mail email address",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "PROTONMAIL_PASSWORD",
+          "description": "Your Proton Mail SMTP password (not your login password; generate one in Proton settings)",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "PROTONMAIL_HOST",
+          "description": "SMTP host",
+          "default": "smtp.protonmail.ch",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "PROTONMAIL_PORT",
+          "description": "SMTP port",
+          "default": "587",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "PROTONMAIL_SECURE",
+          "description": "Use TLS for SMTP (true for port 465)",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IMAP_HOST",
+          "description": "Proton Mail Bridge IMAP host (required for read/search tools)",
+          "default": "127.0.0.1",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IMAP_PORT",
+          "description": "Proton Mail Bridge IMAP port",
+          "default": "1143",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IMAP_SECURE",
+          "description": "Use TLS for IMAP",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IMAP_USERNAME",
+          "description": "Proton Mail Bridge username (falls back to PROTONMAIL_USERNAME)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "IMAP_PASSWORD",
+          "description": "Proton Mail Bridge password (falls back to PROTONMAIL_PASSWORD)",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "READONLY",
+          "description": "Disable all mutating tools (send, move, delete, flags, labels, bulk ops, folder/label management)",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "RESTRICT_OUTBOUND_TO_SELF",
+          "description": "Refuse live sends to any recipient other than PROTONMAIL_USERNAME (for throwaway/QA accounts)",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ALLOW_FILE_DOWNLOAD_DIR",
+          "description": "Allowlist directory enabling download_attachment.saveTo; when unset, attachments return as inline base64",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ALLOW_EMPTY_FOLDER",
+          "description": "Register the empty_folder tool (not recommended)",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "DEBUG",
+          "description": "Enable verbose logging to stderr",
+          "default": "false",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
