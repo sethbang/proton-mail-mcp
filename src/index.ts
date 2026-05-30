@@ -178,7 +178,7 @@ const imapService = new ImapService(imapConfig);
  */
 const server = new McpServer({
   name: "proton-mail-mcp",
-  version: "1.0.0",
+  version: "1.0.2",
 });
 
 // Validate comma-separated email addresses, rejecting dangerous characters
