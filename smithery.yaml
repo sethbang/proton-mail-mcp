@@ -1,0 +1,82 @@
+# Smithery configuration for proton-mail-mcp (local stdio MCP server).
+# https://smithery.ai/docs
+#
+# This server runs locally and connects to Proton Mail over SMTP and over IMAP
+# via the locally-run Proton Mail Bridge. It is unofficial and not affiliated
+# with Proton AG.
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - protonmailUsername
+      - protonmailPassword
+    properties:
+      protonmailUsername:
+        type: string
+        title: Proton Mail username
+        description: Your Proton Mail email address.
+      protonmailPassword:
+        type: string
+        title: Proton Mail SMTP password
+        description: >-
+          Your Proton Mail SMTP password (NOT your login password; generate one
+          in Proton settings).
+      protonmailHost:
+        type: string
+        title: SMTP host
+        default: smtp.protonmail.ch
+      protonmailPort:
+        type: number
+        title: SMTP port
+        default: 587
+      protonmailSecure:
+        type: boolean
+        title: SMTP TLS
+        description: Use TLS for SMTP (true for port 465).
+        default: false
+      imapHost:
+        type: string
+        title: IMAP host (Proton Mail Bridge)
+        description: Proton Mail Bridge host. Required for read/search tools.
+        default: 127.0.0.1
+      imapPort:
+        type: number
+        title: IMAP port (Proton Mail Bridge)
+        default: 1143
+      imapSecure:
+        type: boolean
+        title: IMAP TLS
+        default: false
+      readonly:
+        type: boolean
+        title: Read-only mode
+        description: >-
+          Disable all mutating tools (send/reply/forward, drafts,
+          move/delete/flags/labels, bulk ops, folder/label management).
+        default: false
+      restrictOutboundToSelf:
+        type: boolean
+        title: Restrict outbound to self
+        description: >-
+          Refuse live sends to any recipient other than your own address. Useful
+          for throwaway/QA accounts.
+        default: false
+  commandFunction: |
+    (config) => ({
+      command: 'npx',
+      args: ['-y', 'proton-mail-mcp'],
+      env: {
+        PROTONMAIL_USERNAME: config.protonmailUsername,
+        PROTONMAIL_PASSWORD: config.protonmailPassword,
+        PROTONMAIL_HOST: config.protonmailHost ?? 'smtp.protonmail.ch',
+        PROTONMAIL_PORT: String(config.protonmailPort ?? 587),
+        PROTONMAIL_SECURE: String(config.protonmailSecure ?? false),
+        IMAP_HOST: config.imapHost ?? '127.0.0.1',
+        IMAP_PORT: String(config.imapPort ?? 1143),
+        IMAP_SECURE: String(config.imapSecure ?? false),
+        READONLY: String(config.readonly ?? false),
+        RESTRICT_OUTBOUND_TO_SELF: String(config.restrictOutboundToSelf ?? false),
+      },
+    })
