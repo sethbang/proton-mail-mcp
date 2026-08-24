@@ -149,11 +149,18 @@ function describedNestedParams(tools: Tool[]): string[] {
   return found.sort();
 }
 
+type ClientOptions = ConstructorParameters<typeof Client>[1];
+
 /**
- * Connect a real MCP client to a freshly spawned server and return its tools.
+ * Connect a real MCP client to a freshly spawned server and report both the
+ * era the connection negotiated and the tools it sees.
+ *
  * The credentials are fake by design; nothing in `tools/list` authenticates.
  */
-async function listTools(extraEnv: Record<string, string> = {}): Promise<Tool[]> {
+async function connectAndList(
+  clientOptions?: ClientOptions,
+  extraEnv: Record<string, string> = {},
+): Promise<{ era: string | undefined; tools: Tool[] }> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [SERVER_ENTRY],
@@ -173,14 +180,19 @@ async function listTools(extraEnv: Record<string, string> = {}): Promise<Tool[]>
     stderr: "pipe",
   });
 
-  const client = new Client({ name: "server-smoke-test", version: "0.0.0" });
+  const client = new Client({ name: "server-smoke-test", version: "0.0.0" }, clientOptions);
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    return tools;
+    return { era: client.getProtocolEra(), tools };
   } finally {
     await client.close();
   }
+}
+
+/** Tools as seen by a default client, which negotiates the 2025 era. */
+async function listTools(extraEnv: Record<string, string> = {}): Promise<Tool[]> {
+  return (await connectAndList(undefined, extraEnv)).tools;
 }
 
 describe("MCP server surface (stdio, end-to-end)", () => {
@@ -291,6 +303,58 @@ describe("MCP server surface (stdio, end-to-end)", () => {
       async () => {
         const tools = await listTools({ ALLOW_EMPTY_FOLDER: "true", READONLY: "true" });
         expect(tools.some((t) => t.name === "empty_folder")).toBe(false);
+      },
+      SPAWN_TIMEOUT_MS,
+    );
+  });
+
+  /**
+   * `serveStdio` decides the protocol era once per connection, and its default
+   * (`legacy: 'serve'`) answers both eras from the same factory. These are the
+   * assertions that would catch someone passing `{ legacy: 'reject' }`, which
+   * would silently cut off every client that has not adopted 2026-07-28.
+   *
+   * The tool surface is asserted on both paths deliberately: a server can
+   * negotiate an era correctly and still serve a different set of tools on it.
+   */
+  describe("protocol era negotiation", () => {
+    it(
+      "serves the 2025 era to a default client",
+      async () => {
+        const { era, tools } = await connectAndList();
+        expect(era).toBe("legacy");
+        expect(tools).toHaveLength(DEFAULT_TOOLS.length);
+      },
+      SPAWN_TIMEOUT_MS,
+    );
+
+    it(
+      "serves the 2026-07-28 era to a client pinned to it",
+      async () => {
+        const { era, tools } = await connectAndList({ versionNegotiation: { mode: { pin: "2026-07-28" } } });
+        expect(era).toBe("modern");
+        expect(tools).toHaveLength(DEFAULT_TOOLS.length);
+      },
+      SPAWN_TIMEOUT_MS,
+    );
+
+    it(
+      "negotiates the modern era when a client probes with mode auto",
+      async () => {
+        const { era } = await connectAndList({ versionNegotiation: { mode: "auto" } });
+        expect(era).toBe("modern");
+      },
+      SPAWN_TIMEOUT_MS,
+    );
+
+    it(
+      "exposes an identical tool surface on both eras",
+      async () => {
+        const legacy = await connectAndList();
+        const modern = await connectAndList({ versionNegotiation: { mode: { pin: "2026-07-28" } } });
+        expect(legacy.era).toBe("legacy");
+        expect(modern.era).toBe("modern");
+        expect(modern.tools.map((t) => t.name).sort()).toEqual(legacy.tools.map((t) => t.name).sort());
       },
       SPAWN_TIMEOUT_MS,
     );
