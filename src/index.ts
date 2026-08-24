@@ -3579,16 +3579,15 @@ async function main() {
     );
   }
 
-  // Non-fatal SMTP verification — warn but continue so the server stays up
-  try {
-    await emailService.verifyConnection();
-  } catch (error) {
-    console.error(`[Warning] SMTP verification failed, will retry on first send: ${sanitizeError(error)}`);
-  }
-
-  // serveStdio owns the transport and the era decision. The opening exchange
+  // Open the protocol channel FIRST, before any network I/O.
+  //
+  // serveStdio owns the transport and the era decision: the opening exchange
   // selects the protocol revision for the connection, then one instance from
-  // buildServer() is pinned for its lifetime.
+  // buildServer() is pinned for its lifetime. Registration is synchronous and
+  // needs nothing from SMTP, so there is no reason to make a host that spawned
+  // us wait on a mail server before we start reading stdin. Under v1 this call
+  // sat after the verification below, where an unreachable or slow SMTP host
+  // could delay the handshake by up to connectionTimeout (30s).
   //
   // No `legacy` option: the default ('serve') answers 2025-era openings from
   // the same factory, so clients that have not adopted 2026-07-28 keep working.
@@ -3603,6 +3602,15 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   debugLog("[Setup] Proton Mail MCP server started successfully");
+
+  // Non-fatal SMTP verification — warn but continue so the server stays up.
+  // Runs after the channel is open: a failure here is advisory, and sends
+  // retry on their own.
+  try {
+    await emailService.verifyConnection();
+  } catch (error) {
+    console.error(`[Warning] SMTP verification failed, will retry on first send: ${sanitizeError(error)}`);
+  }
 }
 
 // Set up error handling
